@@ -48,6 +48,20 @@ title = "Restart agent inbox daemon"
 description = "Stop the running daemon and start a fresh one."
 command = ["python3", "daemon.py", "--restart"]
 
+[[actions]]
+id = "quick-actions"
+title = "Quick actions"
+description = "Close/settle or snooze the focused agent from a small popup."
+command = ["python3", "actions.py", "quick-actions"]
+
+[[panes]]
+id = "quick"
+title = "Quick actions"
+placement = "popup"
+width = 46
+height = 10
+command = ["python3", "quick_tui.py"]
+
 [[panes]]
 id = "inbox"
 title = "Agent inbox"
