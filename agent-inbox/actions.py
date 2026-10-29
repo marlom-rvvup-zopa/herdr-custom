@@ -98,10 +98,20 @@ def explain_tickets():
     return 0
 
 
-ACTIONS = {"settle": settle, "open-ticket": open_ticket, "open-pr": open_pr, "toggle-subs": toggle_subs, "explain-tickets": explain_tickets}
+def explain_settle():
+    """Print whether each agent could be settled automatically, and what blocks it."""
+    links = load_json("links.json", {})
+    for agent in herdr_request("agent.list", {})["agents"]:
+        verdict = links.get(agent["pane_id"], {}).get("settle")
+        state = "READY  " if verdict and verdict["ready"] else "waiting"
+        print("%s  %s  %-60s %s" % (agent["pane_id"], state, (agent.get("terminal_title_stripped") or "")[:60], verdict["reason"] if verdict else "not evaluated yet"))
+    return 0
+
+
+ACTIONS = {"settle": settle, "open-ticket": open_ticket, "open-pr": open_pr, "toggle-subs": toggle_subs, "explain-tickets": explain_tickets, "explain-settle": explain_settle}
 
 if __name__ == "__main__":
     action = ACTIONS.get(sys.argv[1] if len(sys.argv) > 1 else "")
     if not action:
-        sys.exit("usage: actions.py settle|open-ticket|open-pr|toggle-subs|explain-tickets")
+        sys.exit("usage: actions.py settle|open-ticket|open-pr|toggle-subs|explain-tickets|explain-settle")
     sys.exit(action())

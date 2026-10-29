@@ -27,9 +27,10 @@ import time
 import github_prs
 import jira_status
 import native_subs
+import auto_settle
 import tab_titles
 import tickets as session_tickets
-from lib import CannotShelve, ago_text, family_root, herdr_request, is_stale, lineage, load_json, prune_sub_links, resume, save_json, shelve, socket_path, state_dir
+from lib import CannotShelve, ago_text, family_root, herdr_request, is_stale, last_interaction, lineage, load_json, notify, prune_sub_links, resume, save_json, shelve, socket_path, state_dir
 
 SOURCE = "marlom.agent-inbox"
 HINT_CHARS = 100
@@ -58,6 +59,8 @@ SUMMARY_TIMEOUT_SECS = 90
 SUMMARY_RETRY_SECS = 600
 SUMMARY_KEEP_SECS = 30 * 24 * 3600
 TICKET_RESCAN_SECS = 60
+# Settling is hard to notice when wrong, so it only goes by PR and Jira data this recent.
+SETTLE_EVIDENCE_MAX_AGE_SECS = 300
 SUMMARY_SYSTEM_PROMPT = (
     "You get the first two prompts of a coding-agent session. Output exactly two lines and nothing else. "
     "Line 1: a title of at most 5 words naming the task, without ticket ids or quotes. "
@@ -343,6 +346,7 @@ class Daemon:
         for rec in agents:
             self.report(rec, self.state[rec["terminal_id"]], now, layout[rec["terminal_id"]])
             self.report_extra(rec, layout[rec["terminal_id"]])
+        self.settle_pass(agents, links, now)
         self.rename_tabs(agents, tab_list, positions)
         self.rename_panes(agents)
         self.report_topics(agents)
@@ -400,6 +404,67 @@ class Daemon:
             except CannotShelve:
                 kept.append(rec)
         return kept
+
+    def settle_pass(self, agents, sub_links, now):
+        """Settle sessions whose PRs are merged and tickets done, or only suggest it, as settle.json says.
+        mode: "suggest" (default, one toast per session), "auto" or "off"; quiet_minutes: how long it must sit idle."""
+        config = load_json("settle.json", {})
+        mode = config.get("mode", auto_settle.DEFAULT_MODE)
+        if mode not in auto_settle.SETTLE_MODES:
+            log("settle.json: unknown mode %r, using off" % mode)
+            mode = "off"
+        quiet_secs = config.get("quiet_minutes", auto_settle.QUIET_MINUTES) * 60
+        touched = load_json("touched.json", {})
+        family = set(sub_links) | set(sub_links.values())
+        done = {key: status["done"] for key, status in self.ticket_status.items()}
+        suggested = set(load_json("settle-suggested.json", []))
+        for rec in agents:
+            st = self.state[rec["terminal_id"]]
+            last_active = last_interaction(rec, st["last_used"], touched)
+            verdict = auto_settle.evaluate(
+                rec, st["unseen_done"], last_active, now, rec["terminal_id"] in family,
+                self.ticket_rows(rec), self.session_prs(rec), done, quiet_secs,
+            )
+            self.links.setdefault(rec["pane_id"], {})["settle"] = {"ready": verdict.ready, "reason": verdict.reason}
+            if mode == "off" or not verdict.ready:
+                continue
+            title = rec.get("terminal_title_stripped") or rec["agent"]
+            if mode == "auto":
+                if not self.evidence_fresh(rec):
+                    continue
+                try:
+                    shelve(rec, "settled", settled_by="auto", settle_reason=verdict.reason)
+                except (CannotShelve, OSError, RuntimeError) as e:
+                    log("auto settle of %s failed: %s" % (rec["pane_id"], e))
+                    continue
+                log("auto settled %s: %s" % (rec["pane_id"], verdict.reason))
+                notify("Auto-settled", "%s (%s)" % (title, verdict.reason))
+            elif rec["agent_session"]["value"] not in suggested:
+                suggested.add(rec["agent_session"]["value"])
+                notify("Ready to settle", "%s (%s)" % (title, verdict.reason))
+        save_json("settle-suggested.json", sorted(suggested))
+
+    def evidence_fresh(self, rec):
+        """True when the session's PRs and primary tickets were last looked up successfully a few minutes ago.
+        Otherwise queue the lookups and say no: the next pass decides on the fresh data."""
+        now = time.time()
+        session = rec.get("agent_session") or {}
+        pr_key = (rec.get("cwd"), session.get("value"))
+        fresh = True
+        if now - self.prs.get(pr_key, {}).get("ok_at", 0) > SETTLE_EVIDENCE_MAX_AGE_SECS:
+            fresh = False
+            if pr_key not in self.pr_queued:
+                self.pr_queued.add(pr_key)
+                self.pr_queue.put(pr_key)
+        for row in self.ticket_rows(rec):
+            if row["role"] != "primary":
+                continue
+            if now - self.ticket_status.get(row["key"], {}).get("ok_at", 0) > SETTLE_EVIDENCE_MAX_AGE_SECS:
+                fresh = False
+                if row["key"] not in self.ticket_queued:
+                    self.ticket_queued.add(row["key"])
+                    self.ticket_queue.put(row["key"])
+        return fresh
 
     def report_extra(self, rec, layout):
         """Tokens beyond the 16 one report can hold: native sub agent rows and the snooze mark."""
@@ -579,12 +644,13 @@ class Daemon:
         while True:
             key = self.pr_queue.get()
             try:
-                self.prs[key] = {"prs": github_prs.session_prs(*key), "at": time.time()}
+                self.prs[key] = {"prs": github_prs.session_prs(*key), "at": time.time(), "ok_at": time.time()}
                 self.dirty.set()
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
                 log("PR lookup failed for %s: %s" % (key[0], e))
                 # Keep any previous result and wait out the refresh interval before retrying.
-                self.prs[key] = {"prs": self.prs.get(key, {}).get("prs", []), "at": time.time()}
+                previous = self.prs.get(key, {})
+                self.prs[key] = {"prs": previous.get("prs", []), "at": time.time(), "ok_at": previous.get("ok_at", 0)}
             finally:
                 self.pr_queued.discard(key)
 
@@ -605,12 +671,12 @@ class Daemon:
             key = self.ticket_queue.get()
             previous = self.ticket_status.get(key, {"done": False})
             try:
-                self.ticket_status[key] = {"done": jira_status.is_done(key), "at": time.time()}
+                self.ticket_status[key] = {"done": jira_status.is_done(key), "at": time.time(), "ok_at": time.time()}
                 self.dirty.set()
             except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as e:
                 log("ticket lookup failed for %s: %s" % (key, e))
                 # Keep any previous status and wait out the refresh interval before retrying.
-                self.ticket_status[key] = {"done": previous["done"], "at": time.time()}
+                self.ticket_status[key] = {"done": previous["done"], "at": time.time(), "ok_at": previous.get("ok_at", 0)}
             finally:
                 self.ticket_queued.discard(key)
 

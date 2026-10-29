@@ -109,6 +109,100 @@ class ReportTest(DaemonTest):
         self.assertEqual((line.endswith("PAY-1 +2"), "PAY-8" in line), (True, False))
 
 
+class SettlePassTest(DaemonTest):
+    def setUp(self):
+        super().setUp()
+        self.rec = agent("a", "idle", agent_session={"kind": "id", "value": "s1"}, terminal_title_stripped="Fix it")
+        self.daemon.state = {"a": {"last_used": NOW - 7200, "status": "idle", "unseen_done": False}}
+        self.daemon.ticket_status = {"PAY-1": {"done": True, "at": NOW, "ok_at": time.time()}}
+        self.daemon.prs = {(self.rec.get("cwd"), "s1"): {"prs": [], "at": time.time(), "ok_at": time.time()}}
+        self.daemon.links = {self.rec["pane_id"]: {}}
+        self.shelved, self.notified = [], []
+        patches = {
+            "shelve": lambda rec, store, **extra: self.shelved.append((rec["pane_id"], store, extra)),
+            "notify": lambda title, body=None: self.notified.append((title, body)),
+            "last_interaction": lambda rec, last_used, touched: NOW - 7200,
+        }
+        for name, value in patches.items():
+            patcher = mock.patch.object(daemon, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for name, value in (("ticket_rows", [{"key": "PAY-1", "role": "primary", "sources": ["pr"]}]), ("session_prs", [{"number": 9, "state": "MERGED"}])):
+            patcher = mock.patch.object(self.daemon, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def run_pass(self, mode=None):
+        if mode:
+            lib.save_json("settle.json", {"mode": mode})
+        self.daemon.settle_pass([self.rec], {}, NOW)
+
+    def test_default_mode_only_suggests(self):
+        self.run_pass()
+        self.assertEqual((self.shelved, self.notified[0][0]), ([], "Ready to settle"))
+
+    def test_suggestion_is_sent_once_per_session(self):
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(len(self.notified), 1)
+
+    def test_auto_mode_settles_and_records_why(self):
+        self.run_pass("auto")
+        pane, store, extra = self.shelved[0]
+        self.assertEqual((store, extra["settled_by"], "#9 merged" in extra["settle_reason"], self.notified[0][0]), ("settled", "auto", True, "Auto-settled"))
+
+    def test_off_mode_does_nothing_but_still_records_the_verdict(self):
+        self.run_pass("off")
+        self.assertEqual((self.shelved, self.notified, self.daemon.links[self.rec["pane_id"]]["settle"]["ready"]), ([], [], True))
+
+    def test_unknown_mode_is_treated_as_off(self):
+        self.run_pass("yolo")
+        self.assertEqual((self.shelved, self.notified), ([], []))
+
+    def test_done_ticket_does_not_override_an_open_pr(self):
+        with mock.patch.object(self.daemon, "session_prs", return_value=[{"number": 9, "state": "MERGED"}, {"number": 10, "state": "OPEN"}]):
+            self.run_pass("auto")
+        self.assertEqual((self.shelved, self.daemon.links[self.rec["pane_id"]]["settle"]["reason"]), ([], "PR #10 is open"))
+
+    def test_stale_pr_data_delays_the_settle_and_queues_a_refresh(self):
+        self.daemon.prs[(self.rec.get("cwd"), "s1")]["ok_at"] = time.time() - 3600
+        self.run_pass("auto")
+        self.assertEqual((self.shelved, self.daemon.pr_queue.qsize()), ([], 1))
+
+    def test_stale_ticket_data_delays_the_settle_and_queues_a_refresh(self):
+        self.daemon.ticket_status["PAY-1"]["ok_at"] = time.time() - 3600
+        self.run_pass("auto")
+        self.assertEqual((self.shelved, self.daemon.ticket_queue.qsize()), ([], 1))
+
+    def test_failed_lookup_does_not_make_old_data_look_fresh(self):
+        self.daemon.ticket_status["PAY-1"].update({"ok_at": time.time() - 3600, "at": time.time()})
+        self.run_pass("auto")
+        self.assertEqual(self.shelved, [])
+
+    def test_suggestions_do_not_wait_for_fresh_data(self):
+        self.daemon.ticket_status["PAY-1"]["ok_at"] = 0
+        self.run_pass("suggest")
+        self.assertEqual(len(self.notified), 1)
+
+    def test_unfinished_session_is_left_alone_and_the_reason_is_recorded(self):
+        self.daemon.ticket_status = {"PAY-1": {"done": False, "at": NOW, "ok_at": time.time()}}
+        self.run_pass("auto")
+        self.assertEqual((self.shelved, self.daemon.links[self.rec["pane_id"]]["settle"]["reason"]), ([], "PAY-1 is not done in Jira"))
+
+    def test_failed_shelve_is_logged_not_raised(self):
+        def refuse(rec, store, **extra):
+            raise daemon.CannotShelve("nope")
+
+        with mock.patch.object(daemon, "shelve", refuse):
+            self.run_pass("auto")
+        self.assertEqual(self.notified, [])
+
+    def test_sub_agent_family_member_is_not_settled(self):
+        lib.save_json("settle.json", {"mode": "auto"})
+        self.daemon.settle_pass([self.rec], {"a": "parent"}, NOW)
+        self.assertEqual(self.shelved, [])
+
+
 class ReplyAgeTest(unittest.TestCase):
     def test_idle_agent_shows_time_since_its_last_answer(self):
         self.assertEqual(daemon.reply_age("idle", {"last_response": NOW - 300}, NOW), "5m ago")
