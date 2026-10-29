@@ -54,22 +54,59 @@ class TicketTest(DaemonTest):
         self.write([{"type": "image", "source": {}}, {"type": "text", "text": "context: PAY-77"}])
         self.assertEqual(self.daemon.ticket(self.rec), "PAY-77")
 
-    def test_tickets_from_several_prompts_keep_their_order(self):
+    def test_first_prompt_ticket_is_shown_and_later_mentions_are_not(self):
         self.write("start with PAY-1", "later PAY-2 and PAY-1")
-        self.assertEqual(self.daemon.ticket(self.rec), "PAY-1 PAY-2")
+        self.assertEqual((self.daemon.ticket(self.rec), {r["key"]: r["role"] for r in self.daemon.ticket_rows(self.rec)}), ("PAY-1", {"PAY-1": "primary", "PAY-2": "mentioned"}))
 
-    def test_new_prompt_is_picked_up_after_the_rescan_interval(self):
+    def test_new_mention_is_picked_up_after_the_rescan_interval(self):
         self.write("PAY-1")
-        self.daemon.ticket(self.rec)
+        self.daemon.ticket_rows(self.rec)
         self.write("PAY-1", "PAY-2")
         with mock.patch.object(daemon.time, "time", return_value=time.time() + daemon.TICKET_RESCAN_SECS + 1):
-            self.assertEqual(self.daemon.ticket(self.rec), "PAY-1 PAY-2")
+            self.assertEqual([r["key"] for r in self.daemon.ticket_rows(self.rec)], ["PAY-1", "PAY-2"])
+
+    def test_pr_title_makes_a_late_link_primary(self):
+        self.write("hi", "more", "still going", "see https://x.atlassian.net/browse/PAY-1251?atlOrigin=abc")
+        with mock.patch.object(self.daemon, "session_prs", return_value=[{"title": "PAY-1251: Fix it"}]):
+            self.assertEqual(self.daemon.ticket_rows(self.rec)[0]["role"], "primary")
 
     def test_unchanged_transcript_is_not_read_again(self):
         self.write("PAY-1")
         self.daemon.ticket(self.rec)
-        with mock.patch.object(daemon, "typed_prompts", side_effect=AssertionError("reread")):
+        with mock.patch.object(daemon.session_tickets, "scan", side_effect=AssertionError("reread")):
             self.assertEqual(self.daemon.ticket(self.rec), "PAY-1")
+
+
+class ReportTest(DaemonTest):
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "s1.jsonl")
+        with open(self.path, "w") as f:
+            f.writelines(user_line(c) for c in ("start PAY-1", "later see PAY-8 and PAY-9"))
+        for name, value in (("transcript_path", lambda session_id: self.path), ("herdr_request", self.capture)):
+            patcher = mock.patch.object(daemon, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(self.daemon, "session_prs", return_value=[])
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(self.daemon, "hint", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.calls = []
+
+    def capture(self, method, params, timeout=10.0):
+        self.calls.append((method, params))
+        return {}
+
+    def test_sidebar_shows_the_owned_ticket_and_counts_the_mentions(self):
+        rec = agent("a", "idle", agent_session={"kind": "id", "value": "s1"}, terminal_title_stripped="T")
+        layout = daemon.layouts([rec], {"a": {"last_used": 1, "status": "idle", "unseen_done": False}}, {}, set(), set())["a"]
+        self.daemon.report(rec, {"last_used": 1, "status": "idle", "unseen_done": False}, NOW, layout)
+        line = self.calls[0][1]["tokens"]["ticket_line"]
+        self.assertEqual((line.endswith("PAY-1 +2"), "PAY-8" in line), (True, False))
 
 
 class ReplyAgeTest(unittest.TestCase):

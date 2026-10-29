@@ -28,6 +28,7 @@ import github_prs
 import jira_status
 import native_subs
 import tab_titles
+import tickets as session_tickets
 from lib import CannotShelve, ago_text, family_root, herdr_request, is_stale, lineage, load_json, prune_sub_links, resume, save_json, shelve, socket_path, state_dir
 
 SOURCE = "marlom.agent-inbox"
@@ -57,9 +58,6 @@ SUMMARY_TIMEOUT_SECS = 90
 SUMMARY_RETRY_SECS = 600
 SUMMARY_KEEP_SECS = 30 * 24 * 3600
 TICKET_RESCAN_SECS = 60
-# Jira keys such as PAY-123; the lookahead skips CVE-2024-1234 style ids.
-TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b(?!-\d)")
-NOT_TICKETS = {"UTF", "SHA", "ISO", "HTTP", "TLS", "AES", "RSA", "MD"}
 SUMMARY_SYSTEM_PROMPT = (
     "You get the first two prompts of a coding-agent session. Output exactly two lines and nothing else. "
     "Line 1: a title of at most 5 words naming the task, without ticket ids or quotes. "
@@ -132,13 +130,6 @@ def transcript_path(session_id):
     return paths[0] if paths else None
 
 
-def prompt_text(content):
-    """Text of a typed prompt. Content is a list of blocks when the prompt has pasted images."""
-    if isinstance(content, list):
-        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-    return content if isinstance(content, str) else None
-
-
 def typed_prompts(session_id):
     """Prompts typed in a Claude session, oldest first; empty if there is no transcript yet."""
     path = transcript_path(session_id)
@@ -151,21 +142,11 @@ def typed_prompts(session_id):
                 entry = json.loads(line)
             except ValueError:
                 continue
-            text = prompt_text((entry.get("message") or {}).get("content"))
+            text = session_tickets.prompt_text((entry.get("message") or {}).get("content"))
             # Skip tool results, meta messages and command/system wrappers.
             if entry.get("type") == "user" and not entry.get("isMeta") and text and not text.startswith("<"):
                 prompts.append(" ".join(text.split()))
     return prompts
-
-
-def find_tickets(prompts):
-    """Unique Jira-style keys in the given prompts, in order of appearance."""
-    found = []
-    for prompt in prompts:
-        for key in TICKET_PATTERN.findall(prompt):
-            if key.rsplit("-", 1)[0] not in NOT_TICKETS and key not in found:
-                found.append(key)
-    return found
 
 
 def summarize(prompts):
@@ -301,7 +282,7 @@ class Daemon:
         }
         self.summary_queue = queue.Queue()
         self.summary_requested = {}
-        self.tickets = {}
+        self.scans = {}
         self.tab_labels = load_json("tabs.json", {})
         self.pane_titles = load_json("pane-titles.json", {})
         self.topics = {}
@@ -443,12 +424,16 @@ class Daemon:
         tokens["title"] = rec.get("terminal_title_stripped")
         tokens["last_reply"] = reply_age(rec["agent_status"], st, now)
         tokens["hint"] = self.hint(rec)
-        tickets = self.ticket(rec)
-        tokens["ticket_line"] = "%s %s" % (JIRA_ICON, self.ticket_text(tickets)) if tickets else None
+        rows = self.ticket_rows(rec)
+        keys, mentioned = session_tickets.display(rows)
+        if keys:
+            tokens["ticket_line"] = "%s %s%s" % (JIRA_ICON, self.ticket_text(" ".join(keys)), " +%d" % mentioned if mentioned else "")
+        else:
+            tokens["ticket_line"] = None
         prs = self.session_prs(rec)
         tokens.update(github_prs.tokens(prs, PR_ICON))
         # Herdr allows 16 tokens per pane, so the actions read links from a file instead.
-        self.links[rec["pane_id"]] = {"tickets": tickets.split() if tickets else [], "pr_urls": [p["url"] for p in prs]}
+        self.links[rec["pane_id"]] = {"tickets": [r["key"] for r in rows], "ticket_roles": rows, "pr_urls": [p["url"] for p in prs]}
         hint = tokens["hint"]
         indent_tokens(tokens, layout, shown)
         params = {"pane_id": rec["pane_id"], "source": SOURCE, "tokens": tokens}
@@ -547,8 +532,8 @@ class Daemon:
         session = rec.get("agent_session") or {}
         return (self.summaries.get(session.get("value")) or {}).get("title")
 
-    def ticket(self, rec):
-        """Jira keys from every prompt of the session. Rescans when the transcript grows, at most once per TICKET_RESCAN_SECS."""
+    def session_scan(self, rec):
+        """Transcript scan of a Claude session. Rescans when the transcript grows, at most once per TICKET_RESCAN_SECS."""
         session = rec.get("agent_session") or {}
         if rec["agent"] != "claude" or session.get("kind") != "id":
             return None
@@ -558,12 +543,24 @@ class Daemon:
             return None
         stat = os.stat(path)
         signature = (stat.st_mtime_ns, stat.st_size)
-        cached = self.tickets.get(session_id)
+        cached = self.scans.get(session_id)
         if cached and (cached["signature"] == signature or time.time() - cached["at"] < TICKET_RESCAN_SECS):
-            return cached["tickets"]
-        tickets = " ".join(find_tickets(typed_prompts(session_id))) or None
-        self.tickets[session_id] = {"signature": signature, "at": time.time(), "tickets": tickets}
-        return tickets
+            return cached["scan"]
+        found = session_tickets.scan(path)
+        self.scans[session_id] = {"signature": signature, "at": time.time(), "scan": found}
+        return found
+
+    def ticket_rows(self, rec):
+        """The session's tickets with their role and why: primary, touched or mentioned (see tickets.py)."""
+        found = self.session_scan(rec)
+        if not found:
+            return []
+        return session_tickets.classify(found, [p.get("title") for p in self.session_prs(rec)])
+
+    def ticket(self, rec):
+        """Space separated keys worth showing, owned ones first."""
+        shown, _ = session_tickets.display(self.ticket_rows(rec))
+        return " ".join(shown) or None
 
     def session_prs(self, rec):
         """Cached PRs for the agent's branch and the PRs its session created; refreshed in the background."""

@@ -85,10 +85,23 @@ def toggle_subs():
     return 0
 
 
-ACTIONS = {"settle": settle, "open-ticket": open_ticket, "open-pr": open_pr, "toggle-subs": toggle_subs}
+def explain_tickets():
+    """Print each agent's tickets with their role and the signals behind it, as last seen by the daemon."""
+    links = load_json("links.json", {})
+    for agent in herdr_request("agent.list", {})["agents"]:
+        rows = links.get(agent["pane_id"], {}).get("ticket_roles", [])
+        print("%s  %s" % (agent["pane_id"], (agent.get("terminal_title_stripped") or "")[:60]))
+        for row in rows:
+            print("    %-12s %-10s %s" % (row["key"], row["role"], ", ".join(row["sources"])))
+        if not rows:
+            print("    (no tickets)")
+    return 0
+
+
+ACTIONS = {"settle": settle, "open-ticket": open_ticket, "open-pr": open_pr, "toggle-subs": toggle_subs, "explain-tickets": explain_tickets}
 
 if __name__ == "__main__":
     action = ACTIONS.get(sys.argv[1] if len(sys.argv) > 1 else "")
     if not action:
-        sys.exit("usage: actions.py settle|open-ticket|open-pr|toggle-subs")
+        sys.exit("usage: actions.py settle|open-ticket|open-pr|toggle-subs|explain-tickets")
     sys.exit(action())
