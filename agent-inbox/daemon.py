@@ -56,7 +56,7 @@ SUMMARY_MIN_PROMPTS = 2
 SUMMARY_TIMEOUT_SECS = 90
 SUMMARY_RETRY_SECS = 600
 SUMMARY_KEEP_SECS = 30 * 24 * 3600
-TICKET_PROMPTS = 3
+TICKET_RESCAN_SECS = 60
 # Jira keys such as PAY-123; the lookahead skips CVE-2024-1234 style ids.
 TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b(?!-\d)")
 NOT_TICKETS = {"UTF", "SHA", "ISO", "HTTP", "TLS", "AES", "RSA", "MD"}
@@ -125,23 +125,35 @@ def tab_positions(tabs):
     return positions
 
 
+def transcript_path(session_id):
+    if not re.fullmatch(r"[A-Za-z0-9-]+", session_id):
+        return None
+    paths = glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % session_id))
+    return paths[0] if paths else None
+
+
+def prompt_text(content):
+    """Text of a typed prompt. Content is a list of blocks when the prompt has pasted images."""
+    if isinstance(content, list):
+        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return content if isinstance(content, str) else None
+
+
 def typed_prompts(session_id):
     """Prompts typed in a Claude session, oldest first; empty if there is no transcript yet."""
-    if not re.fullmatch(r"[A-Za-z0-9-]+", session_id):
-        return []
-    paths = glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % session_id))
-    if not paths:
+    path = transcript_path(session_id)
+    if not path:
         return []
     prompts = []
-    with open(paths[0]) as f:
+    with open(path) as f:
         for line in f:
             try:
                 entry = json.loads(line)
             except ValueError:
                 continue
-            text = (entry.get("message") or {}).get("content")
+            text = prompt_text((entry.get("message") or {}).get("content"))
             # Skip tool results, meta messages and command/system wrappers.
-            if entry.get("type") == "user" and not entry.get("isMeta") and isinstance(text, str) and not text.startswith("<"):
+            if entry.get("type") == "user" and not entry.get("isMeta") and text and not text.startswith("<"):
                 prompts.append(" ".join(text.split()))
     return prompts
 
@@ -536,18 +548,22 @@ class Daemon:
         return (self.summaries.get(session.get("value")) or {}).get("title")
 
     def ticket(self, rec):
-        """Jira keys from the first prompts; settled once the session has that many."""
+        """Jira keys from every prompt of the session. Rescans when the transcript grows, at most once per TICKET_RESCAN_SECS."""
         session = rec.get("agent_session") or {}
         if rec["agent"] != "claude" or session.get("kind") != "id":
             return None
         session_id = session["value"]
-        if session_id not in self.tickets:
-            prompts = typed_prompts(session_id)[:TICKET_PROMPTS]
-            tickets = " ".join(find_tickets(prompts)) or None
-            if len(prompts) < TICKET_PROMPTS:
-                return tickets
-            self.tickets[session_id] = tickets
-        return self.tickets[session_id]
+        path = transcript_path(session_id)
+        if not path:
+            return None
+        stat = os.stat(path)
+        signature = (stat.st_mtime_ns, stat.st_size)
+        cached = self.tickets.get(session_id)
+        if cached and (cached["signature"] == signature or time.time() - cached["at"] < TICKET_RESCAN_SECS):
+            return cached["tickets"]
+        tickets = " ".join(find_tickets(typed_prompts(session_id))) or None
+        self.tickets[session_id] = {"signature": signature, "at": time.time(), "tickets": tickets}
+        return tickets
 
     def session_prs(self, rec):
         """Cached PRs for the agent's branch and the PRs its session created; refreshed in the background."""

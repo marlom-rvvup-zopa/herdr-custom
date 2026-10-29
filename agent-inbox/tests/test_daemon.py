@@ -1,6 +1,8 @@
+import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -24,6 +26,50 @@ class DaemonTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.daemon = daemon.Daemon()
+
+
+def user_line(content):
+    return json.dumps({"type": "user", "message": {"content": content}}) + "\n"
+
+
+class TicketTest(DaemonTest):
+    def setUp(self):
+        super().setUp()
+        self.path = os.path.join(os.environ["HERDR_SOCKET_PATH"] + ".d", "s1.jsonl")
+        os.makedirs(os.path.dirname(self.path))
+        patcher = mock.patch.object(daemon, "transcript_path", lambda session_id: self.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.rec = {"agent": "claude", "agent_session": {"kind": "id", "value": "s1"}}
+
+    def write(self, *contents):
+        with open(self.path, "w") as f:
+            f.writelines(user_line(c) for c in contents)
+
+    def test_link_in_a_late_prompt_is_found(self):
+        self.write("hi", "more", "still going", "and again", "see https://zopapos.atlassian.net/browse/PAY-1251?atlOrigin=abc")
+        self.assertEqual(self.daemon.ticket(self.rec), "PAY-1251")
+
+    def test_link_in_a_prompt_with_a_pasted_image_is_found(self):
+        self.write([{"type": "image", "source": {}}, {"type": "text", "text": "context: PAY-77"}])
+        self.assertEqual(self.daemon.ticket(self.rec), "PAY-77")
+
+    def test_tickets_from_several_prompts_keep_their_order(self):
+        self.write("start with PAY-1", "later PAY-2 and PAY-1")
+        self.assertEqual(self.daemon.ticket(self.rec), "PAY-1 PAY-2")
+
+    def test_new_prompt_is_picked_up_after_the_rescan_interval(self):
+        self.write("PAY-1")
+        self.daemon.ticket(self.rec)
+        self.write("PAY-1", "PAY-2")
+        with mock.patch.object(daemon.time, "time", return_value=time.time() + daemon.TICKET_RESCAN_SECS + 1):
+            self.assertEqual(self.daemon.ticket(self.rec), "PAY-1 PAY-2")
+
+    def test_unchanged_transcript_is_not_read_again(self):
+        self.write("PAY-1")
+        self.daemon.ticket(self.rec)
+        with mock.patch.object(daemon, "typed_prompts", side_effect=AssertionError("reread")):
+            self.assertEqual(self.daemon.ticket(self.rec), "PAY-1")
 
 
 class ReplyAgeTest(unittest.TestCase):
