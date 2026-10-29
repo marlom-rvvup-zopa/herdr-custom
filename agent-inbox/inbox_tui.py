@@ -103,16 +103,26 @@ class Inbox:
             # Entries settled before the inbox kept a different timestamp key.
             at = entry.get(when) or entry.get("settled_at") or entry.get("shelved_at") or 0
             shown = "in " + age(at - self.now) if when == "wake_at" else age(self.now - at) + " ago"
-            rows.append({"key": entry["session"], "entry": entry, "cells": [shown, entry["title"], entry.get("workspace_label") or "", os.path.basename(entry["cwd"])]})
+            where = [entry["title"], entry.get("workspace_label") or "", os.path.basename(entry["cwd"])]
+            # The settled tab says who settled each session, so wrong automatic settles are easy to spot.
+            cells = [shown, *settled_by_cells(entry), *where] if store == "settled" else [shown, *where]
+            rows.append({"key": entry["session"], "entry": entry, "cells": cells})
         if when == "wake_at":
             rows.sort(key=lambda r: r["entry"]["wake_at"])
         return rows
 
 
+def settled_by_cells(entry):
+    """Who settled the session and, for an automatic settle, the evidence it went by."""
+    if entry.get("settled_by") == "auto":
+        return ["auto", entry.get("settle_reason") or ""]
+    return ["you", ""]
+
+
 HEADERS = {
     OPEN: ["Status", " ", "Idle", "Title", "Workspace", "Ticket"],
     STALE: ["Stale", "Title", "Workspace", "Directory"],
-    SETTLED: ["Settled", "Title", "Workspace", "Directory"],
+    SETTLED: ["Settled", "By", "Why", "Title", "Workspace", "Directory"],
     SNOOZED: ["Wakes", "Title", "Workspace", "Directory"],
 }
 

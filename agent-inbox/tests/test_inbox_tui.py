@@ -82,6 +82,24 @@ class SnoozeTest(unittest.TestCase):
         self.assertEqual([name for name, _ in lib.SNOOZE_CHOICES], ["4 hours", "1 day", "3 days", "7 days"])
 
 
+class SettledByTest(unittest.TestCase):
+    def test_automatic_settle_shows_its_reason(self):
+        entry = {"settled_by": "auto", "settle_reason": "#9 merged, PAY-1 done"}
+        self.assertEqual(inbox_tui.settled_by_cells(entry), ["auto", "#9 merged, PAY-1 done"])
+
+    def test_manual_and_older_entries_show_you(self):
+        self.assertEqual(inbox_tui.settled_by_cells({"title": "T"}), ["you", ""])
+
+    def test_settled_rows_match_their_headers(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HERDR_SOCKET_PATH": os.path.join(tmp, "herdr.sock")}):
+            lib.save_json("settled.json", [{"session": "s1", "title": "T", "cwd": "/p/x", "shelved_at": NOW - 60, "settled_by": "auto", "settle_reason": "why"}])
+            inbox = inbox_tui.Inbox.__new__(inbox_tui.Inbox)
+            inbox.now = NOW
+            [row] = inbox.stored("settled", {}, "shelved_at")
+        self.assertEqual(dict(zip(inbox_tui.HEADERS[inbox_tui.SETTLED], row["cells"]))["By"], "auto")
+        self.assertEqual(len(row["cells"]), len(inbox_tui.HEADERS[inbox_tui.SETTLED]))
+
+
 if __name__ == "__main__":
     unittest.main()
 
