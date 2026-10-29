@@ -28,7 +28,7 @@ import github_prs
 import jira_status
 import native_subs
 import tab_titles
-from lib import CannotShelve, family_root, herdr_request, is_stale, lineage, load_json, prune_sub_links, resume, save_json, shelve, socket_path, state_dir
+from lib import CannotShelve, ago_text, family_root, herdr_request, is_stale, lineage, load_json, prune_sub_links, resume, save_json, shelve, socket_path, state_dir
 
 SOURCE = "marlom.agent-inbox"
 HINT_CHARS = 100
@@ -261,6 +261,13 @@ def native_tokens(subs, layout):
     return tokens
 
 
+def reply_age(status, st, now):
+    """How long ago the agent last answered; nothing while it works or before its first answer is seen."""
+    if status == "working" or not st.get("last_response"):
+        return None
+    return ago_text(int(now - st["last_response"]))
+
+
 def display_status(status, unseen_done):
     if status in ("working", "blocked"):
         return status
@@ -329,6 +336,8 @@ class Daemon:
             status = rec["agent_status"]
             if status == "working" and st["status"] != "working":
                 st["last_used"] = now
+            if st["status"] == "working" and status != "working":
+                st["last_response"] = now
             if st["status"] == "working" and status in ("idle", "done"):
                 st["unseen_done"] = True
             if status == "working" or rec.get("focused"):
@@ -339,7 +348,7 @@ class Daemon:
         woken = self.update_woken(agents, now)
         layout = layouts(agents, self.state, links, set(load_json("collapsed.json", [])), woken)
         for rec in agents:
-            self.report(rec, self.state[rec["terminal_id"]], positions.get(rec["tab_id"]), layout[rec["terminal_id"]])
+            self.report(rec, self.state[rec["terminal_id"]], now, layout[rec["terminal_id"]])
             self.report_extra(rec, layout[rec["terminal_id"]])
         self.rename_tabs(agents, tab_list, positions)
         self.rename_panes(agents)
@@ -412,7 +421,7 @@ class Daemon:
         herdr_request("pane.report_metadata", params)
         self.reported[key] = params
 
-    def report(self, rec, st, position, layout):
+    def report(self, rec, st, now, layout):
         shown = display_status(rec["agent_status"], st["unseen_done"])
         tokens = {token: None for token in STATE_TOKENS.values()}
         if shown:
@@ -420,7 +429,7 @@ class Daemon:
         tokens["sort_key"] = layout["sort_key"]
         tokens["hidden"] = "1" if layout["hidden"] else None
         tokens["title"] = rec.get("terminal_title_stripped")
-        tokens["tab_no"] = str(position) if position else None
+        tokens["last_reply"] = reply_age(rec["agent_status"], st, now)
         tokens["hint"] = self.hint(rec)
         tickets = self.ticket(rec)
         tokens["ticket_line"] = "%s %s" % (JIRA_ICON, self.ticket_text(tickets)) if tickets else None

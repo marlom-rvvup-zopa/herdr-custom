@@ -197,3 +197,11 @@ def resume(entry, focus):
     touched[pane["terminal_id"]] = time.time()
     save_json("touched.json", touched)
     return pane["terminal_id"]
+
+
+def ago_text(seconds):
+    """Compact age such as "just now", "5m ago", "2h ago", "3d ago"."""
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return "%d%s ago" % (seconds // size, unit)
+    return "just now"

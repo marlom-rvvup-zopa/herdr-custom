@@ -26,6 +26,20 @@ class DaemonTest(unittest.TestCase):
         self.daemon = daemon.Daemon()
 
 
+class ReplyAgeTest(unittest.TestCase):
+    def test_idle_agent_shows_time_since_its_last_answer(self):
+        self.assertEqual(daemon.reply_age("idle", {"last_response": NOW - 300}, NOW), "5m ago")
+
+    def test_working_agent_shows_nothing(self):
+        self.assertIsNone(daemon.reply_age("working", {"last_response": NOW - 300}, NOW))
+
+    def test_agent_with_no_seen_answer_shows_nothing(self):
+        self.assertIsNone(daemon.reply_age("idle", {}, NOW))
+
+    def test_blocked_agent_still_shows_its_last_answer(self):
+        self.assertEqual(daemon.reply_age("blocked", {"last_response": NOW - 60}, NOW), "1m ago")
+
+
 class LayoutsTest(unittest.TestCase):
     def order(self, woken):
         agents = [agent("a"), agent("b")]

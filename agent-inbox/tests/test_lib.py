@@ -124,3 +124,8 @@ class HerdrCliTest(unittest.TestCase):
     def test_command_with_no_output_returns_an_empty_result(self):
         with mock.patch.object(lib.subprocess, "run", return_value=mock.Mock(stdout="")):
             self.assertEqual(lib.herdr_cli("pane", "run", "p", "x"), {})
+
+
+class AgoTextTest(unittest.TestCase):
+    def test_units(self):
+        self.assertEqual([lib.ago_text(s) for s in (0, 59, 60, 3599, 3600, 90000, 200000)], ["just now", "just now", "1m ago", "59m ago", "1h ago", "1d ago", "2d ago"])
