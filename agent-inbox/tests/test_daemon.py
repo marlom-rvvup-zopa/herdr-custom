@@ -109,6 +109,60 @@ class ReportTest(DaemonTest):
         self.assertEqual((line.endswith("PAY-1 +2"), "PAY-8" in line), (True, False))
 
 
+class RenameClearedSessionTest(DaemonTest):
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        for name, value in (("herdr_request", self.capture), ("save_json", lambda name, data: None)):
+            patcher = mock.patch.object(daemon, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.daemon.state = {"a": {"last_used": 1}}
+        self.cleared = agent("a", tab_id="t1", terminal_title_stripped="Claude Code", agent_session={"kind": "id", "value": "new"})
+
+    def capture(self, method, params, timeout=10.0):
+        self.calls.append((method, params))
+        return {"panes": [{"pane_id": "w1:a", "label": "Old title", "cwd": "/x"}]}
+
+    def test_tab_named_by_the_plugin_goes_back_to_its_position(self):
+        self.daemon.tab_labels = {"t1": "2 · Old title"}
+        self.daemon.rename_tabs([self.cleared], [{"tab_id": "t1", "label": "2 · Old title"}], {"t1": 2})
+        self.assertEqual(self.calls, [("tab.rename", {"tab_id": "t1", "label": "2"})])
+
+    def test_tab_the_user_named_is_kept(self):
+        self.daemon.tab_labels = {"t1": "2 · Old title"}
+        self.daemon.rename_tabs([self.cleared], [{"tab_id": "t1", "label": "my tab"}], {"t1": 2})
+        self.assertEqual(self.calls, [])
+
+    def test_pane_labelled_with_an_earlier_title_loses_it(self):
+        self.daemon.pane_titles = {"w1:a": ["Old title"]}
+        self.daemon.pane_labels = {"w1:a": "Old title"}
+        self.daemon.rename_panes([self.cleared])
+        self.assertEqual(self.calls[-1], ("pane.rename", {"pane_id": "w1:a", "label": None}))
+
+    def test_pane_the_user_named_is_kept(self):
+        self.daemon.pane_titles = {"w1:a": ["Another title"]}
+        self.daemon.pane_labels = {"w1:a": "Old title"}
+        self.daemon.rename_panes([self.cleared])
+        self.assertEqual([c[0] for c in self.calls], ["pane.list"])
+
+    def test_label_met_for_the_first_time_is_herdrs_and_follows_the_sidebar_title(self):
+        named = agent("a", tab_id="t1", terminal_title_stripped="New title")
+        self.daemon.rename_panes([named])
+        self.assertEqual(self.calls[-1], ("pane.rename", {"pane_id": "w1:a", "label": "New title"}))
+
+    def test_tab_shared_by_several_agents_is_left_alone(self):
+        agents = [agent(tid, tab_id="t1", terminal_title_stripped="Title " + tid) for tid in ("a", "b")]
+        self.daemon.state["b"] = {"last_used": 2}
+        self.daemon.rename_tabs(agents, [{"tab_id": "t1", "label": "2"}], {"t1": 2})
+        self.assertEqual(self.calls, [])
+
+    def test_tab_takes_the_sidebar_title(self):
+        named = agent("a", tab_id="t1", terminal_title_stripped="PAY-1 Fix login")
+        self.daemon.rename_tabs([named], [{"tab_id": "t1", "label": "2"}], {"t1": 2})
+        self.assertEqual(self.calls, [("tab.rename", {"tab_id": "t1", "label": "2 · PAY-1 Fix login"})])
+
+
 class SettlePassTest(DaemonTest):
     def setUp(self):
         super().setUp()

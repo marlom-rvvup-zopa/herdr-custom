@@ -10,6 +10,7 @@ Usage: daemon.py            run the daemon (exits if one is already running)
        daemon.py --restart  stop the running daemon and start a fresh one
 """
 
+import collections
 import fcntl
 import glob
 import json
@@ -62,9 +63,8 @@ TICKET_RESCAN_SECS = 60
 # Settling is hard to notice when wrong, so it only goes by PR and Jira data this recent.
 SETTLE_EVIDENCE_MAX_AGE_SECS = 300
 SUMMARY_SYSTEM_PROMPT = (
-    "You get the first two prompts of a coding-agent session. Output exactly two lines and nothing else. "
-    "Line 1: a title of at most 5 words naming the task, without ticket ids or quotes. "
-    "Line 2: a summary of what the session is about in at most 12 words."
+    "You get the first two prompts of a coding-agent session. Output one line and nothing else: "
+    "a summary of what the session is about in at most 12 words."
 )
 TICK_SECS = 30
 DEBOUNCE_SECS = 0.3
@@ -153,7 +153,7 @@ def typed_prompts(session_id):
 
 
 def summarize(prompts):
-    """Ask Claude for (title, summary) of the session, or None on failure."""
+    """Ask Claude for a one-line summary of the session, or None on failure."""
     claude = shutil.which("claude") or os.path.expanduser("~/.local/bin/claude")
     text = "First prompt: %s\nSecond prompt: %s" % (prompts[0][:SUMMARY_PROMPT_CHARS], prompts[1][:SUMMARY_PROMPT_CHARS])
     # --bare skips the user's hooks; cwd /tmp keeps project instructions out of the call.
@@ -161,11 +161,11 @@ def summarize(prompts):
         [claude, "-p", "--bare", "--no-session-persistence", "--model", "haiku", "--system-prompt", SUMMARY_SYSTEM_PROMPT],
         input=text, capture_output=True, text=True, timeout=SUMMARY_TIMEOUT_SECS, cwd="/tmp",
     )
-    parsed = tab_titles.parse_title_and_summary(result.stdout)
-    if result.returncode != 0 or not parsed:
+    summary = tab_titles.parse_summary(result.stdout)
+    if result.returncode != 0 or not summary:
         log("summary failed (exit %d): %s %s" % (result.returncode, result.stderr.strip()[:200], result.stdout.strip()[:200]))
         return None
-    return parsed[0], parsed[1][:HINT_CHARS]
+    return summary[:HINT_CHARS]
 
 
 def layouts(agents, state, parents, collapsed, woken):
@@ -288,6 +288,7 @@ class Daemon:
         self.scans = {}
         self.tab_labels = load_json("tabs.json", {})
         self.pane_titles = load_json("pane-titles.json", {})
+        self.pane_labels = load_json("pane-labels.json", {})
         self.topics = {}
         self.ticket_status = {}
         self.ticket_queue = queue.Queue()
@@ -524,12 +525,19 @@ class Daemon:
         return {group: rec for group, (_, rec) in best.items()}
 
     def rename_tabs(self, agents, tab_list, positions):
-        """Name each tab after its newest agent's generated title, unless the user renamed it."""
+        """Name each tab after its agent's sidebar title, unless the user renamed it or several agents share the tab."""
         newest = self.newest_titled_agent_by(agents, lambda rec: rec["tab_id"])
+        agent_counts = collections.Counter(rec["tab_id"] for rec in agents)
         self.tab_labels = {tab_id: label for tab_id, label in self.tab_labels.items() if tab_id in positions}
         for tab in tab_list:
+            if agent_counts[tab["tab_id"]] > 1:
+                continue
             rec = newest.get(tab["tab_id"])
             if not rec:
+                # A cleared session has no title yet: drop the old one the plugin wrote.
+                if agent_counts[tab["tab_id"]] and tab["label"] == self.tab_labels.get(tab["tab_id"]):
+                    herdr_request("tab.rename", {"tab_id": tab["tab_id"], "label": str(positions[tab["tab_id"]])})
+                    del self.tab_labels[tab["tab_id"]]
                 continue
             tickets = (self.ticket(rec) or "").split()
             label = tab_titles.tab_label(positions[tab["tab_id"]], tickets[0] if tickets else None, self.session_title(rec))
@@ -541,25 +549,38 @@ class Daemon:
 
     def rename_panes(self, agents):
         """Label each pane with the session title the sidebar shows, unless the user renamed it.
-        Herdr labels a pane once, so it keeps the first title after Claude renames the session."""
+        Herdr labels a pane once, so it keeps the first title after Claude renames the session.
+        A label met for the first time on a pane is taken as herdr's, so it can be replaced."""
         panes = {p["pane_id"]: p for p in herdr_request("pane.list", {}).get("panes", [])}
         live = {rec["pane_id"] for rec in agents}
         self.pane_titles = {pane_id: seen for pane_id, seen in self.pane_titles.items() if pane_id in live}
+        met = self.pane_labels
+        self.pane_labels = {pane_id: label for pane_id, label in met.items() if pane_id in live}
         for rec in agents:
             title = rec.get("terminal_title_stripped")
             pane = panes.get(rec["pane_id"])
-            if not title or not pane or title in tab_titles.GENERIC_PANE_TITLES:
+            if not title or not pane:
                 continue
             seen = self.pane_titles.setdefault(rec["pane_id"], [])
-            if pane.get("label") != title and tab_titles.may_rename_pane(pane.get("label"), seen, pane.get("cwd")):
+            label = pane.get("label")
+            if rec["pane_id"] not in met and label and label not in seen and label != os.path.basename(pane.get("cwd") or ""):
+                seen.append(label)
+            self.pane_labels[rec["pane_id"]] = label
+            if title in tab_titles.GENERIC_PANE_TITLES:
+                # A cleared session is unnamed again: drop the old title, back to herdr's default label.
+                if label in seen:
+                    herdr_request("pane.rename", {"pane_id": rec["pane_id"], "label": None})
+                continue
+            if label != title and tab_titles.may_rename_pane(label, seen, pane.get("cwd")):
                 herdr_request("pane.rename", {"pane_id": rec["pane_id"], "label": title})
             if title not in seen:
                 seen.append(title)
                 del seen[:-PANE_TITLES_KEPT]
         save_json("pane-titles.json", self.pane_titles)
+        save_json("pane-labels.json", self.pane_labels)
 
     def report_topics(self, agents):
-        """Workspace topic for the sidebar: the generated title of the workspace's newest agent."""
+        """Workspace topic for the sidebar: the title of the workspace's newest agent."""
         for workspace_id, rec in self.newest_titled_agent_by(agents, lambda rec: rec["workspace_id"]).items():
             topic = self.session_title(rec)
             if self.topics.get(workspace_id) != topic:
@@ -582,20 +603,17 @@ class Daemon:
         cached = self.summaries.get(session_id)
         if cached:
             cached["seen"] = time.time()
-        # Summaries saved before titles existed are regenerated once.
-        if cached and "title" in cached:
             return cached["text"]
         prompts = typed_prompts(session_id)
         if len(prompts) >= SUMMARY_MIN_PROMPTS and time.time() - self.summary_requested.get(session_id, 0) > SUMMARY_RETRY_SECS:
             self.summary_requested[session_id] = time.time()
             self.summary_queue.put(session_id)
-        if cached:
-            return cached["text"]
         return prompts[0][:HINT_CHARS] if prompts else None
 
     def session_title(self, rec):
-        session = rec.get("agent_session") or {}
-        return (self.summaries.get(session.get("value")) or {}).get("title")
+        """The title the sidebar shows, once Claude has named the session."""
+        title = rec.get("terminal_title_stripped")
+        return title if title and title not in tab_titles.GENERIC_PANE_TITLES else None
 
     def session_scan(self, rec):
         """Transcript scan of a Claude session. Rescans when the transcript grows, at most once per TICKET_RESCAN_SECS."""
@@ -689,7 +707,7 @@ class Daemon:
                 log("summary failed: %s" % e)
                 continue
             if generated:
-                self.summaries[session_id] = {"title": generated[0], "text": generated[1], "seen": time.time()}
+                self.summaries[session_id] = {"text": generated, "seen": time.time()}
                 self.dirty.set()
 
     def events_loop(self):
