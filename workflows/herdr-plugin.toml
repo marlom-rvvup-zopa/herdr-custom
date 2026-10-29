@@ -1,0 +1,34 @@
+id = "marlom.workflows"
+name = "Workflows"
+version = "0.1.0"
+description = "Workflows and automations written as Python scripts on the herdr API."
+min_herdr_version = "0.9.0"
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["python3", "triggerd.py"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["python3", "triggerd.py", "--ensure"]
+
+[[actions]]
+id = "open-picker"
+title = "Workflows"
+description = "Pick a workflow and run it."
+contexts = ["workspace", "pane", "selection"]
+command = ["python3", "hwf.py", "open-picker"]
+
+[[actions]]
+id = "restart-triggers"
+title = "Restart workflow triggers"
+description = "Stop the trigger daemon and start a fresh one, picking up new TRIGGERS."
+command = ["python3", "triggerd.py", "--restart"]
+
+[[panes]]
+id = "picker"
+title = "Workflows"
+placement = "popup"
+width = "70%"
+height = "60%"
+command = ["python3", "picker.py"]
