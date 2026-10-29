@@ -7,8 +7,10 @@ import re
 import subprocess
 
 PR_URL_PATTERN = re.compile(r"https://github\.com/([\w.-]+)/[\w.-]+/pull/\d+")
+# Commands that make a PR part of the session's work. `gh pr view` is left out: it also reads other people's PRs.
+PR_WRITE_COMMAND = re.compile(r"\bgh pr (create|edit|ready|merge|comment|close|reopen)\b")
 REMOTE_PATTERN = re.compile(r"github\.com[:/]([\w.-]+)/")
-PR_FIELDS = "number,url,state,isDraft,statusCheckRollup,reviewDecision"
+PR_FIELDS = "number,title,url,state,isDraft,statusCheckRollup,reviewDecision"
 GH_TIMEOUT_SECS = 30
 FAILED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
 # Display order in the sidebar row; one token per state so each gets its own color.
@@ -58,8 +60,8 @@ def branch_pr(cwd):
     return gh_pr_view([], match.group(1), cwd=cwd) if match else None
 
 
-def created_pr_urls(session_id):
-    """PR URLs printed by `gh pr create` commands in a Claude session."""
+def worked_pr_urls(session_id):
+    """PR URLs printed by `gh pr` commands that create or change a PR in a Claude session."""
     if not re.fullmatch(r"[A-Za-z0-9-]+", session_id):
         return []
     paths = glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % session_id))
@@ -73,7 +75,7 @@ def created_pr_urls(session_id):
             except ValueError:
                 continue
             for block in content if isinstance(content, list) else []:
-                if block.get("type") == "tool_use" and "gh pr create" in str((block.get("input") or {}).get("command", "")):
+                if block.get("type") == "tool_use" and PR_WRITE_COMMAND.search(str((block.get("input") or {}).get("command", ""))):
                     create_calls.add(block["id"])
                 elif block.get("type") == "tool_result" and block.get("tool_use_id") in create_calls:
                     urls += [m.group(0) for m in PR_URL_PATTERN.finditer(str(block.get("content")))]
@@ -97,12 +99,12 @@ def strike(text):
 
 
 def session_prs(cwd, session_id):
-    """Unique PR dicts for the cwd's branch and, for Claude sessions, the PRs the session created."""
+    """Unique PR dicts for the cwd's branch and, for Claude sessions, the PRs the session created or changed."""
     prs = []
     branch = branch_pr(cwd) if cwd and os.path.isdir(cwd) else None
     if branch:
         prs.append(branch)
-    for url in created_pr_urls(session_id) if session_id else []:
+    for url in worked_pr_urls(session_id) if session_id else []:
         pr = gh_pr_view([url], PR_URL_PATTERN.match(url).group(1))
         if pr and all(pr["url"] != p["url"] for p in prs):
             prs.append(pr)
