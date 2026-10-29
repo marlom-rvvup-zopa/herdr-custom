@@ -11,6 +11,8 @@ background (or with a long timeout) when the answer is not needed immediately.
 import os
 import secrets
 import sys
+import threading
+import time
 
 from lib import herdr_request, link_sub_agent, state_dir
 
@@ -21,6 +23,17 @@ TAB_LABEL_CHARS = 28
 
 def terminal_id(pane_id):
     return next(a["terminal_id"] for a in herdr_request("agent.list", {})["agents"] if a["pane_id"] == pane_id)
+
+
+def wait_for_terminal(pane_id):
+    """The new pane shows up in the agent list while agent.start is still blocked, e.g. on a trust prompt."""
+    deadline = time.time() + START_TIMEOUT_MS / 1000
+    while time.time() < deadline:
+        for agent in herdr_request("agent.list", {})["agents"]:
+            if agent["pane_id"] == pane_id:
+                return agent["terminal_id"]
+        time.sleep(0.5)
+    sys.exit("Sub agent never appeared in the agent list.")
 
 
 def main(label, prompt):
@@ -38,8 +51,11 @@ def main(label, prompt):
         "focus": False,
     })
     pane_id = tab["root_pane"]["pane_id"]
-    herdr_request("agent.start", {"name": name, "kind": "claude", "pane_id": pane_id}, timeout=60)
-    link_sub_agent(terminal_id(pane_id), terminal_id(parent_pane))
+    # Link as soon as the sub agent is listed, so the sidebar nests it even if the start is slow.
+    start = threading.Thread(target=herdr_request, args=("agent.start", {"name": name, "kind": "claude", "pane_id": pane_id}), kwargs={"timeout": 60})
+    start.start()
+    link_sub_agent(wait_for_terminal(pane_id), terminal_id(parent_pane))
+    start.join()
     # agent.start can return while Claude is still booting; prompts are rejected until it is idle.
     herdr_request("agent.wait", {"target": name, "until": ["idle"], "timeout_ms": START_TIMEOUT_MS}, timeout=START_TIMEOUT_MS / 1000 + 10)
 
@@ -56,7 +72,7 @@ def main(label, prompt):
             print(f.read())
         return
     # The agent did not write the file: fall back to what is on its screen.
-    print(herdr_request("agent.read", {"target": name, "source": "recent-unwrapped", "lines": 200})["text"])
+    print(herdr_request("agent.read", {"target": name, "source": "recent_unwrapped", "lines": 200})["text"])
 
 
 if __name__ == "__main__":

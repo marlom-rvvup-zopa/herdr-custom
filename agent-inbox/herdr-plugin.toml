@@ -49,9 +49,9 @@ description = "Stop the running daemon and start a fresh one."
 command = ["python3", "daemon.py", "--restart"]
 
 [[panes]]
-id = "settled"
-title = "Settled agents"
+id = "inbox"
+title = "Agent inbox"
 placement = "popup"
-width = "70%"
-height = "60%"
-command = ["python3", "settled_tui.py"]
+width = "85%"
+height = "70%"
+command = ["python3", "inbox_tui.py"]

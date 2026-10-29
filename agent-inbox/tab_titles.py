@@ -1,5 +1,6 @@
 """Tab title rules: what a tab is called and whether the plugin may rename it."""
 
+import os
 import re
 
 TITLE_CHARS = 40
@@ -15,6 +16,16 @@ def tab_label(position, ticket, title):
 def may_rename(label, last_set):
     """True unless the user gave the tab a name of their own."""
     return label == last_set or bool(MANAGED_LABEL.match(label))
+
+
+# Titles Claude Code shows before it has named the session.
+GENERIC_PANE_TITLES = {"Claude Code"}
+
+
+def may_rename_pane(label, seen_titles, cwd):
+    """True unless the user gave the pane a name of their own: herdr's default is the directory name,
+    and every other label the plugin may replace is one the pane's terminal title already had."""
+    return not label or label in seen_titles or label == os.path.basename(cwd or "")
 
 
 def parse_title_and_summary(output):

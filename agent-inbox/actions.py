@@ -7,9 +7,8 @@ import re
 import signal
 import subprocess
 import sys
-import time
 
-from lib import RESUME_COMMANDS, family_root, herdr_request, load_json, notify, save_json, state_dir
+from lib import CannotShelve, family_root, herdr_request, load_json, notify, save_json, shelve, state_dir
 
 JIRA_BROWSE_URL = "https://zopapos.atlassian.net/browse/"
 TICKET_PATTERN = re.compile(r"[A-Z][A-Z0-9]{1,9}-\d+")
@@ -29,26 +28,12 @@ def settle():
     if not agent:
         notify("Settle failed", "No agent in the focused pane.")
         return 1
-    if agent["agent_status"] in ("working", "blocked"):
-        notify("Settle failed", "Agent is %s. Wait until it is idle." % agent["agent_status"])
+    try:
+        entry = shelve(agent, "settled")
+    except CannotShelve as e:
+        notify("Settle failed", str(e))
         return 1
-    session = agent.get("agent_session") or {}
-    if agent["agent"] not in RESUME_COMMANDS or session.get("kind") != "id":
-        notify("Settle failed", "Cannot resume %s sessions, so closing would lose it." % agent["agent"])
-        return 1
-    settled = [e for e in load_json("settled.json", []) if e["session"] != session["value"]]
-    settled.insert(0, {
-        "agent": agent["agent"],
-        "session": session["value"],
-        "cwd": agent["cwd"],
-        "workspace_id": agent["workspace_id"],
-        "workspace_label": herdr_request("workspace.get", {"workspace_id": agent["workspace_id"]})["workspace"]["label"],
-        "title": agent.get("terminal_title_stripped") or agent["agent"],
-        "settled_at": time.time(),
-    })
-    save_json("settled.json", settled)
-    herdr_request("pane.close", {"pane_id": pane_id})
-    notify("Settled", settled[0]["title"])
+    notify("Settled", entry["title"])
     return 0
 
 

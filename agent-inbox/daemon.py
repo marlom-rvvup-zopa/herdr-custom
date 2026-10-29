@@ -26,15 +26,26 @@ import time
 
 import github_prs
 import jira_status
+import native_subs
 import tab_titles
-from lib import family_root, herdr_request, load_json, prune_sub_links, save_json, socket_path, state_dir
+from lib import CannotShelve, family_root, herdr_request, is_stale, lineage, load_json, prune_sub_links, resume, save_json, shelve, socket_path, state_dir
 
 SOURCE = "marlom.agent-inbox"
 HINT_CHARS = 100
 JIRA_ICON = chr(0xf0303)
 # Herdr trims plain whitespace from token values, so indentation uses the braille blank.
 BLANK = "\u2800"
-SUB_MARK = "↳ "
+# Tree glyphs for sub agents: the last visible child of a parent closes its branch.
+SUB_MARK = "├─ "
+LAST_SUB_MARK = "└─ "
+SUB_GUTTER = "│"
+# Native sub agents are listed on their parent's row, in tokens of their own: one report holds at most 16 tokens.
+NATIVE_SOURCE = "marlom.agent-inbox.native"
+NATIVE_ROWS = 4
+PANE_TITLES_KEPT = 20
+# Shown after the status of an agent that came back from a snooze and has not been touched since.
+SNOOZE_ICON = BLANK + chr(0xf068e)
+NATIVE_TOKENS = ["native_%d" % n for n in range(1, NATIVE_ROWS + 1)]
 PR_ICON = chr(0xf407)
 PR_REFRESH_SECS = 120
 PR_DONE_REFRESH_SECS = 1800
@@ -161,8 +172,9 @@ def summarize(prompts):
     return parsed[0], parsed[1][:HINT_CHARS]
 
 
-def layouts(agents, state, parents, collapsed):
-    """Per terminal: sub agent depth, sort key and visibility. A family sorts by its most recent member."""
+def layouts(agents, state, parents, collapsed, woken):
+    """Per terminal: sub agent depth, sort key and visibility. A family sorts by its most recent member,
+    and a family with an agent back from a snooze sorts before every other one."""
     live = {a["terminal_id"]: a for a in agents}
     parents = {child: parent for child, parent in parents.items() if child in live and parent in live}
     families = {}
@@ -171,18 +183,39 @@ def layouts(agents, state, parents, collapsed):
     out = {}
     for root, members in families.items():
         family_time = max(state[tid]["last_used"] for tid in members)
+        back = any(tid in woken for tid in members)
         for tid in members:
             depth = family_root(tid, parents)[1]
-            # The root sorts first in its family (desc), then its sub agents by recency.
-            tail = "9" if depth == 0 else "5%012d" % state[tid]["last_used"]
+            # The key spells out the path from the root, one recency segment per sub agent, closed by "9".
+            # Sorted desc, a parent ("9") comes before its children ("5...") and each subtree stays contiguous.
+            path = lineage(tid, parents)[-2::-1]
+            tail = "".join("5%012d%s" % (state[node]["last_used"], node[-6:].rjust(6)) for node in path) + "9"
             out[tid] = {
                 "depth": depth,
-                "sort_key": "%012d-%s-%s" % (family_time, root[-6:], tail),
+                "woken": tid in woken,
+                "sort_key": "%d%012d-%s-%s" % (1 + back, family_time, root[-6:], tail),
                 # A sub agent that needs input stays visible even when its family is collapsed.
                 "hidden": depth > 0 and root in collapsed and live[tid]["agent_status"] != "blocked",
                 "hidden_subs": len(members) - 1 if depth == 0 and root in collapsed else 0,
             }
+    mark_last_children(out, parents)
     return out
+
+
+def mark_last_children(out, parents):
+    """Flag the sub agent drawn last under each parent, reading the order the sidebar sorts into,
+    and build the guide columns each sub agent row starts with (a gutter under every open branch)."""
+    drawn = sorted((tid for tid, lay in out.items() if lay["depth"] and not lay["hidden"]), key=lambda tid: out[tid]["sort_key"], reverse=True)
+    last = {parents[tid]: tid for tid in drawn}
+    for tid, lay in out.items():
+        lay["last_child"] = last.get(parents.get(tid)) == tid
+        lay["has_subs"] = tid in last
+    for tid, lay in out.items():
+        # Ancestors between the root and this row, outermost first.
+        between = lineage(tid, parents)[1:-1][::-1]
+        lay["guides"] = BLANK * 2 + "".join(
+            (BLANK if out[node]["last_child"] else SUB_GUTTER) + BLANK * 2 for node in between
+        )
 
 
 def indent_tokens(tokens, layout, shown):
@@ -193,17 +226,39 @@ def indent_tokens(tokens, layout, shown):
         tokens[state_token] += " (+%d)" % layout["hidden_subs"]
     if not layout["depth"]:
         return
-    pad = BLANK * 2 * layout["depth"]
+    pad = layout["guides"]
+    mark = LAST_SUB_MARK if layout["last_child"] else SUB_MARK
+    # Rows below the first continue the branch with a gutter line, except under the closing child.
+    gutter = BLANK if layout["last_child"] else SUB_GUTTER
+    cont = pad + gutter + BLANK * (len(mark) - 1)
     if state_token:
-        tokens[state_token] = pad + SUB_MARK + tokens[state_token]
+        tokens[state_token] = pad + mark + tokens[state_token]
     for name in ("title", "hint"):
         if tokens[name]:
-            tokens[name] = pad + BLANK * 2 + tokens[name]
+            tokens[name] = cont + tokens[name]
     # Row 4 starts with the ticket if there is one, otherwise with the first PR token.
     row_tokens = ["ticket_line", *github_prs.PR_TOKENS.values()]
     first = next((name for name in row_tokens if tokens[name]), None)
     if first:
-        tokens[first] = pad + BLANK * 2 + tokens[first]
+        tokens[first] = cont + tokens[first]
+
+
+def native_tokens(subs, layout):
+    """One tree row per running native sub agent, hanging under the parent's own rows."""
+    tokens = {name: None for name in NATIVE_TOKENS}
+    if not subs or layout["hidden_subs"]:
+        return tokens
+    # Rows hang one level below the parent, in the column its own children use.
+    pad = BLANK * 2 if not layout["depth"] else layout["guides"] + (BLANK if layout["last_child"] else SUB_GUTTER) + BLANK * 2
+    shown = subs[:NATIVE_ROWS]
+    hidden = len(subs) - len(shown)
+    if hidden:
+        shown[-1] = ("+%d more" % (hidden + 1), "")
+    for n, (name, description) in enumerate(shown):
+        closes = n == len(shown) - 1 and not layout["has_subs"]
+        text = name + (" · " + description if description else "")
+        tokens[NATIVE_TOKENS[n]] = pad + (LAST_SUB_MARK if closes else SUB_MARK) + text
+    return tokens
 
 
 def display_status(status, unseen_done):
@@ -229,6 +284,7 @@ class Daemon:
         self.summary_requested = {}
         self.tickets = {}
         self.tab_labels = load_json("tabs.json", {})
+        self.pane_titles = load_json("pane-titles.json", {})
         self.topics = {}
         self.ticket_status = {}
         self.ticket_queue = queue.Queue()
@@ -255,6 +311,7 @@ class Daemon:
         tab_list = herdr_request("tab.list", {}).get("tabs", [])
         positions = tab_positions(tab_list)
         now = time.time()
+        self.wake_due(now)
         self.links = {}
         # Terminals seen for the first time keep herdr's own recency order.
         new = sorted(
@@ -277,10 +334,15 @@ class Daemon:
             if status == "working" or rec.get("focused"):
                 st["unseen_done"] = False
             st["status"] = status
-        layout = layouts(agents, self.state, load_json("subagents.json", {}), set(load_json("collapsed.json", [])))
+        links = load_json("subagents.json", {})
+        agents = self.archive_stale(agents, links, now)
+        woken = self.update_woken(agents, now)
+        layout = layouts(agents, self.state, links, set(load_json("collapsed.json", [])), woken)
         for rec in agents:
             self.report(rec, self.state[rec["terminal_id"]], positions.get(rec["tab_id"]), layout[rec["terminal_id"]])
+            self.report_extra(rec, layout[rec["terminal_id"]])
         self.rename_tabs(agents, tab_list, positions)
+        self.rename_panes(agents)
         self.report_topics(agents)
         live = {a["terminal_id"] for a in agents}
         prune_sub_links(live)
@@ -288,6 +350,67 @@ class Daemon:
         save_json("state.json", self.state)
         save_json("links.json", self.links)
         self.prune_summaries()
+
+    def wake_due(self, now):
+        """Resume snoozed sessions whose time has come, each in a new tab, and mark them woken."""
+        snoozed = load_json("snoozed.json", [])
+        due = [e for e in snoozed if e["wake_at"] <= now]
+        if not due:
+            return
+        save_json("snoozed.json", [e for e in snoozed if e["wake_at"] > now])
+        woken = load_json("woken.json", {})
+        for entry in due:
+            try:
+                woken[resume(entry, focus=False)] = now
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
+                # Try again in five minutes rather than every tick.
+                log("wake failed for %s: %s" % (entry["title"], e))
+                save_json("snoozed.json", load_json("snoozed.json", []) + [{**entry, "wake_at": now + 300}])
+        save_json("woken.json", woken)
+
+    def update_woken(self, agents, now):
+        """Terminals back from a snooze that the user has not touched since. Prompting one clears it."""
+        woken = load_json("woken.json", {})
+        status = {rec["terminal_id"]: rec["agent_status"] for rec in agents}
+        # A resumed pane is not an agent for a few seconds, so an unlisted terminal gets ten minutes.
+        kept = {
+            tid: at for tid, at in woken.items()
+            if (status[tid] != "working" if tid in status else now - at < 600)
+        }
+        if kept != woken:
+            save_json("woken.json", kept)
+        return set(kept)
+
+    def archive_stale(self, agents, links, now):
+        """Close agents nobody has touched for a day and keep their sessions in the stale list.
+        Agents in a sub agent family stay: closing one would orphan the others."""
+        touched = load_json("touched.json", {})
+        family = set(links) | set(links.values())
+        kept = []
+        for rec in agents:
+            tid = rec["terminal_id"]
+            if tid in family or not is_stale(rec, self.state[tid]["last_used"], touched, now):
+                kept.append(rec)
+                continue
+            try:
+                shelve(rec, "stale", stale_at=now)
+                log("archived stale agent %s" % rec["pane_id"])
+            except CannotShelve:
+                kept.append(rec)
+        return kept
+
+    def report_extra(self, rec, layout):
+        """Tokens beyond the 16 one report can hold: native sub agent rows and the snooze mark."""
+        session = rec.get("agent_session") or {}
+        is_claude = rec["agent"] == "claude" and session.get("kind") == "id"
+        tokens = native_tokens(native_subs.running(session["value"]) if is_claude else [], layout)
+        tokens["snooze_mark"] = SNOOZE_ICON if layout["woken"] else None
+        params = {"pane_id": rec["pane_id"], "source": NATIVE_SOURCE, "tokens": tokens}
+        key = rec["pane_id"] + NATIVE_SOURCE
+        if self.reported.get(key) == params:
+            return
+        herdr_request("pane.report_metadata", params)
+        self.reported[key] = params
 
     def report(self, rec, st, position, layout):
         shown = display_status(rec["agent_status"], st["unseen_done"])
@@ -344,6 +467,25 @@ class Daemon:
             if tab["label"] == label or tab_titles.may_rename(tab["label"], self.tab_labels.get(tab["tab_id"])):
                 self.tab_labels[tab["tab_id"]] = label
         save_json("tabs.json", self.tab_labels)
+
+    def rename_panes(self, agents):
+        """Label each pane with the session title the sidebar shows, unless the user renamed it.
+        Herdr labels a pane once, so it keeps the first title after Claude renames the session."""
+        panes = {p["pane_id"]: p for p in herdr_request("pane.list", {}).get("panes", [])}
+        live = {rec["pane_id"] for rec in agents}
+        self.pane_titles = {pane_id: seen for pane_id, seen in self.pane_titles.items() if pane_id in live}
+        for rec in agents:
+            title = rec.get("terminal_title_stripped")
+            pane = panes.get(rec["pane_id"])
+            if not title or not pane or title in tab_titles.GENERIC_PANE_TITLES:
+                continue
+            seen = self.pane_titles.setdefault(rec["pane_id"], [])
+            if pane.get("label") != title and tab_titles.may_rename_pane(pane.get("label"), seen, pane.get("cwd")):
+                herdr_request("pane.rename", {"pane_id": rec["pane_id"], "label": title})
+            if title not in seen:
+                seen.append(title)
+                del seen[:-PANE_TITLES_KEPT]
+        save_json("pane-titles.json", self.pane_titles)
 
     def report_topics(self, agents):
         """Workspace topic for the sidebar: the generated title of the workspace's newest agent."""
