@@ -1,0 +1,57 @@
+id = "marlom.agent-inbox"
+name = "Agent Inbox"
+version = "0.1.0"
+description = "Agents sorted by last prompt, clear working/needs-input/done states, and a settled list you can resume from."
+min_herdr_version = "0.9.0"
+platforms = ["macos", "linux"]
+
+[[startup]]
+command = ["python3", "daemon.py"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["python3", "daemon.py", "--ensure"]
+
+[[actions]]
+id = "settle"
+title = "Settle agent"
+description = "Close the focused agent's pane and move it to the settled list."
+command = ["python3", "actions.py", "settle"]
+
+[[actions]]
+id = "open-ticket"
+title = "Open ticket"
+description = "Open the Jira ticket(s) mentioned in the focused agent's session."
+command = ["python3", "actions.py", "open-ticket"]
+
+[[link_handlers]]
+id = "jira-ticket"
+title = "Open Jira ticket"
+pattern = '\b[A-Z][A-Z0-9]{1,9}-\d+\b'
+action = "open-ticket"
+
+[[actions]]
+id = "open-pr"
+title = "Open PR"
+description = "Open the pull request(s) attached to the focused agent."
+command = ["python3", "actions.py", "open-pr"]
+
+[[actions]]
+id = "toggle-subs"
+title = "Toggle sub agents"
+description = "Collapse or expand the sub agents of the focused agent in the sidebar."
+command = ["python3", "actions.py", "toggle-subs"]
+
+[[actions]]
+id = "restart-daemon"
+title = "Restart agent inbox daemon"
+description = "Stop the running daemon and start a fresh one."
+command = ["python3", "daemon.py", "--restart"]
+
+[[panes]]
+id = "settled"
+title = "Settled agents"
+placement = "popup"
+width = "70%"
+height = "60%"
+command = ["python3", "settled_tui.py"]
