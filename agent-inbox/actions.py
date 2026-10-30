@@ -8,9 +8,10 @@ import signal
 import subprocess
 import sys
 
+import jira_status
 from lib import CannotShelve, family_root, herdr_request, load_json, notify, save_json, shelve, state_dir
 
-JIRA_BROWSE_URL = "https://zopapos.atlassian.net/browse/"
+JIRA_BROWSE_URL = "https://%s/browse/" % jira_status.JIRA_SITE
 TICKET_PATTERN = re.compile(r"[A-Z][A-Z0-9]{1,9}-\d+")
 
 

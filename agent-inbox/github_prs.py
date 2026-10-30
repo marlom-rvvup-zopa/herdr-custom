@@ -13,8 +13,10 @@ REMOTE_PATTERN = re.compile(r"github\.com[:/]([\w.-]+)/")
 PR_FIELDS = "number,title,url,state,isDraft,statusCheckRollup,reviewDecision"
 GH_TIMEOUT_SECS = 30
 FAILED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
-# Display order in the sidebar row; one token per state so each gets its own color.
-PR_TOKENS = {"passing": "pr_pass", "pending": "pr_pending", "failing": "pr_fail", "MERGED": "pr_merged", None: "pr_open", "CLOSED": "pr_closed"}
+# Display order in the sidebar row, live PRs first and finished ones last; one token per state so each gets its own color.
+PR_TOKENS = {"passing": "pr_pass", "pending": "pr_pending", "failing": "pr_fail", None: "pr_open", "MERGED": "pr_merged", "CLOSED": "pr_closed"}
+# The same tokens for the second sidebar row, used when the PRs do not fit on the ticket row.
+PR_LINE_TOKENS = {state: name.replace("pr_", "prl_") for state, name in PR_TOKENS.items()}
 APPROVED_SYMBOL = "✓"
 
 _tokens = {}
@@ -111,10 +113,10 @@ def session_prs(cwd, session_id):
     return prs
 
 
-def tokens(prs, icon):
-    """Sidebar tokens, one per PR state so each can be colored. Merged and closed PRs are struck through,
+def tokens(prs, icon, names=PR_TOKENS):
+    """Sidebar tokens named by `names`, one per PR state so each can be colored. Merged and closed PRs are struck through,
     open PRs get a check once approved. The icon goes inside the first token so a single PR has no separator."""
-    out = {name: None for name in PR_TOKENS.values()}
+    out = {name: None for name in names.values()}
     for pr in prs:
         state = pr_state(pr)
         text = "#%d" % pr["number"]
@@ -122,9 +124,9 @@ def tokens(prs, icon):
             text = strike(text)
         elif pr.get("reviewDecision") == "APPROVED":
             text += APPROVED_SYMBOL
-        name = PR_TOKENS[state]
+        name = names[state]
         out[name] = "%s %s" % (out[name], text) if out[name] else text
-    first = next((name for name in PR_TOKENS.values() if out[name]), None)
+    first = next((name for name in names.values() if out[name]), None)
     if first:
         out[first] = "%s %s" % (icon, out[first])
     return out

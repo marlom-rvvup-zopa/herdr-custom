@@ -96,6 +96,12 @@ class ReportTest(DaemonTest):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.calls = []
+        self.check("PAY-1", "PAY-8", "PAY-9")
+
+    def check(self, *keys):
+        """Jira has confirmed these tickets exist."""
+        for key in keys:
+            self.daemon.ticket_status[key] = {"done": False, "at": time.time(), "ok_at": time.time()}
 
     def capture(self, method, params, timeout=10.0):
         self.calls.append((method, params))
@@ -107,6 +113,85 @@ class ReportTest(DaemonTest):
         self.daemon.report(rec, {"last_used": 1, "status": "idle", "unseen_done": False}, NOW, layout)
         line = self.calls[0][1]["tokens"]["ticket_line"]
         self.assertEqual((line.endswith("PAY-1 +2"), "PAY-8" in line), (True, False))
+
+
+class TicketCheckTest(TicketTest):
+    def setUp(self):
+        super().setUp()
+        self.write("start with PAY-1 and QS-2")
+
+    def keys(self):
+        return [r["key"] for r in self.daemon.ticket_rows(self.rec)]
+
+    def test_every_prefix_is_accepted_until_the_project_list_is_known(self):
+        self.assertEqual(self.keys(), ["PAY-1", "QS-2"])
+
+    def test_only_prefixes_of_projects_we_can_see_are_accepted(self):
+        self.daemon.projects = {"keys": ["PAY"], "at": time.time()}
+        self.assertEqual(self.keys(), ["PAY-1"])
+
+    def test_tracked_prefixes_are_accepted_as_well(self):
+        self.daemon.projects = {"keys": ["PAY"], "at": time.time()}
+        with mock.patch.object(daemon, "load_json", return_value=["QS"]):
+            self.assertEqual(self.keys(), ["PAY-1", "QS-2"])
+
+    def test_a_ticket_jira_does_not_know_is_dropped(self):
+        self.daemon.ticket_status["QS-2"] = {"done": False, "missing": True, "at": time.time(), "ok_at": time.time()}
+        self.assertEqual(self.keys(), ["PAY-1"])
+
+    def test_a_ticket_is_shown_only_after_jira_confirmed_it(self):
+        self.assertEqual(self.daemon.checked_tickets(["PAY-1"]), [])
+        self.assertEqual(self.daemon.ticket_queue.get_nowait(), "PAY-1")
+
+    def test_done_tickets_come_last(self):
+        now = time.time()
+        self.daemon.ticket_status["PAY-1"] = {"done": True, "at": now, "ok_at": now}
+        self.daemon.ticket_status["PAY-2"] = {"done": False, "at": now, "ok_at": now}
+        self.assertEqual(self.daemon.checked_tickets(["PAY-1", "PAY-2"]), ["PAY-2", "PAY-1"])
+
+    def test_a_confirmed_ticket_is_shown(self):
+        self.daemon.ticket_status["PAY-1"] = {"done": False, "at": time.time(), "ok_at": time.time()}
+        self.assertEqual(self.daemon.checked_tickets(["PAY-1"]), ["PAY-1"])
+
+    def test_a_ticket_jira_does_not_know_is_never_shown(self):
+        self.daemon.ticket_status["PAY-1"] = {"done": False, "missing": True, "at": time.time(), "ok_at": time.time()}
+        self.assertEqual(self.daemon.checked_tickets(["PAY-1"]), [])
+
+    def test_a_ticket_jira_does_not_know_is_remembered_by_the_lookup_loop(self):
+        self.daemon.ticket_queue.put("QS-2")
+        with mock.patch.object(daemon.jira_status, "is_done", side_effect=daemon.jira_status.TicketNotFound("nope")), mock.patch.object(self.daemon.ticket_queue, "get", side_effect=["QS-2", SystemExit]):
+            with self.assertRaises(SystemExit):
+                self.daemon.ticket_loop()
+        self.assertTrue(self.daemon.ticket_status["QS-2"]["missing"])
+
+
+class PrLineTest(ReportTest):
+    PRS = [{"number": n, "state": "OPEN", "statusCheckRollup": [], "url": "u%d" % n} for n in (1, 2, 3)]
+
+    def tokens(self, ticket_count, pr_count):
+        rows = [{"key": "PAY-%d" % n, "role": "primary", "sources": []} for n in range(ticket_count)]
+        self.check(*[row["key"] for row in rows])
+        rec = agent("a", "idle", agent_session={"kind": "id", "value": "s1"}, terminal_title_stripped="T")
+        state = {"a": {"last_used": 1, "status": "idle", "unseen_done": False}}
+        layout = daemon.layouts([rec], state, {}, set(), set())["a"]
+        with mock.patch.object(self.daemon, "ticket_rows", return_value=rows), mock.patch.object(self.daemon, "session_prs", return_value=self.PRS[:pr_count]):
+            self.daemon.report(rec, state["a"], NOW, layout)
+            self.daemon.report_extra(rec, layout)
+        main = next(p["tokens"] for m, p in self.calls if p["source"] == daemon.SOURCE)
+        extra = next(p["tokens"] for m, p in self.calls if p["source"] == daemon.NATIVE_SOURCE)
+        return main, extra
+
+    def test_three_tickets_and_three_prs_put_the_prs_on_their_own_row(self):
+        main, extra = self.tokens(3, 3)
+        self.assertEqual((main["pr_open"], extra["prl_open"].endswith("#1 #2 #3")), (None, True))
+
+    def test_two_tickets_keep_the_prs_next_to_them(self):
+        main, extra = self.tokens(2, 3)
+        self.assertEqual((main["pr_open"].endswith("#1 #2 #3"), extra["prl_open"]), (True, None))
+
+    def test_two_prs_keep_them_next_to_the_tickets(self):
+        main, extra = self.tokens(3, 2)
+        self.assertEqual((main["pr_open"].endswith("#1 #2"), extra["prl_open"]), (True, None))
 
 
 class RenameClearedSessionTest(DaemonTest):

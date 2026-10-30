@@ -44,6 +44,8 @@ LAST_SUB_MARK = "└─ "
 SUB_GUTTER = "│"
 # Native sub agents are listed on their parent's row, in tokens of their own: one report holds at most 16 tokens.
 NATIVE_SOURCE = "marlom.agent-inbox.native"
+# More tickets and more PRs than this do not share a sidebar row.
+MAX_ON_TICKET_ROW = 2
 NATIVE_ROWS = 4
 PANE_TITLES_KEPT = 20
 # Shown after the status of an agent that came back from a snooze and has not been touched since.
@@ -54,6 +56,8 @@ PR_REFRESH_SECS = 120
 PR_DONE_REFRESH_SECS = 1800
 TICKET_REFRESH_SECS = 300
 TICKET_DONE_REFRESH_SECS = 3600
+PROJECTS_REFRESH_SECS = 3600
+PROJECTS_RETRY_SECS = 300
 SUMMARY_PROMPT_CHARS = 1000
 SUMMARY_MIN_PROMPTS = 2
 SUMMARY_TIMEOUT_SECS = 90
@@ -214,6 +218,18 @@ def mark_last_children(out, parents):
         )
 
 
+def continuation_pad(layout):
+    """What a sub agent's rows below the first start with: its branch continues with a gutter line, except under the closing child."""
+    mark = LAST_SUB_MARK if layout["last_child"] else SUB_MARK
+    gutter = BLANK if layout["last_child"] else SUB_GUTTER
+    return layout["guides"] + gutter + BLANK * (len(mark) - 1)
+
+
+def pr_line_split(ticket_keys, prs):
+    """True when there are too many tickets and PRs for one sidebar row: the PRs then get a row of their own."""
+    return len(ticket_keys) > MAX_ON_TICKET_ROW and len(prs) > MAX_ON_TICKET_ROW
+
+
 def indent_tokens(tokens, layout, shown):
     """Indent sub agents under their parent by prefixing the first token of each sidebar row,
     and note on a collapsed parent how many sub agents are hidden."""
@@ -224,9 +240,7 @@ def indent_tokens(tokens, layout, shown):
         return
     pad = layout["guides"]
     mark = LAST_SUB_MARK if layout["last_child"] else SUB_MARK
-    # Rows below the first continue the branch with a gutter line, except under the closing child.
-    gutter = BLANK if layout["last_child"] else SUB_GUTTER
-    cont = pad + gutter + BLANK * (len(mark) - 1)
+    cont = continuation_pad(layout)
     if state_token:
         tokens[state_token] = pad + mark + tokens[state_token]
     for name in ("title", "hint"):
@@ -291,6 +305,8 @@ class Daemon:
         self.pane_labels = load_json("pane-labels.json", {})
         self.topics = {}
         self.ticket_status = {}
+        # Keys of the Jira projects we can see, looked up with acli and cached on disk.
+        self.projects = load_json("jira-projects.json", {})
         self.ticket_queue = queue.Queue()
         self.ticket_queued = set()
         self.links = {}
@@ -468,11 +484,17 @@ class Daemon:
         return fresh
 
     def report_extra(self, rec, layout):
-        """Tokens beyond the 16 one report can hold: native sub agent rows and the snooze mark."""
+        """Tokens beyond the 16 one report can hold: native sub agent rows, the snooze mark and the PR row used when it is split from the tickets."""
         session = rec.get("agent_session") or {}
         is_claude = rec["agent"] == "claude" and session.get("kind") == "id"
         tokens = native_tokens(native_subs.running(session["value"]) if is_claude else [], layout)
         tokens["snooze_mark"] = SNOOZE_ICON if layout["woken"] else None
+        prs = self.session_prs(rec)
+        split = pr_line_split(self.shown_tickets(self.ticket_rows(rec))[0], prs)
+        tokens.update(github_prs.tokens(prs if split else [], PR_ICON, github_prs.PR_LINE_TOKENS))
+        if split and layout["depth"]:
+            first = next(name for name in github_prs.PR_LINE_TOKENS.values() if tokens[name])
+            tokens[first] = continuation_pad(layout) + tokens[first]
         params = {"pane_id": rec["pane_id"], "source": NATIVE_SOURCE, "tokens": tokens}
         key = rec["pane_id"] + NATIVE_SOURCE
         if self.reported.get(key) == params:
@@ -491,13 +513,14 @@ class Daemon:
         tokens["last_reply"] = reply_age(rec["agent_status"], st, now)
         tokens["hint"] = self.hint(rec)
         rows = self.ticket_rows(rec)
-        keys, mentioned = session_tickets.display(rows)
+        keys, mentioned = self.shown_tickets(rows)
         if keys:
-            tokens["ticket_line"] = "%s %s%s" % (JIRA_ICON, self.ticket_text(" ".join(keys)), " +%d" % mentioned if mentioned else "")
+            tokens["ticket_line"] = "%s %s%s" % (JIRA_ICON, self.ticket_text(keys), " +%d" % mentioned if mentioned else "")
         else:
             tokens["ticket_line"] = None
         prs = self.session_prs(rec)
-        tokens.update(github_prs.tokens(prs, PR_ICON))
+        # Shown by report_extra on a second row when they do not fit next to the tickets.
+        tokens.update(github_prs.tokens([] if pr_line_split(keys, prs) else prs, PR_ICON))
         # Herdr allows 16 tokens per pane, so the actions read links from a file instead.
         self.links[rec["pane_id"]] = {"tickets": [r["key"] for r in rows], "ticket_roles": rows, "pr_urls": [p["url"] for p in prs]}
         hint = tokens["hint"]
@@ -638,7 +661,16 @@ class Daemon:
         found = self.session_scan(rec)
         if not found:
             return []
-        return session_tickets.classify(found, [p.get("title") for p in self.session_prs(rec)])
+        rows = session_tickets.classify(found, [p.get("title") for p in self.session_prs(rec)])
+        prefixes = self.ticket_prefixes()
+        return [r for r in rows if (prefixes is None or r["key"].rsplit("-", 1)[0] in prefixes) and not self.ticket_status.get(r["key"], {}).get("missing")]
+
+    def ticket_prefixes(self):
+        """Project keys a ticket may have: every project we can see plus tracked-prefixes.json, a list of extra ones to track.
+        None until the project list has been fetched, so tickets are not hidden while it is unknown."""
+        if not self.projects.get("keys"):
+            return None
+        return set(self.projects["keys"]) | set(load_json("tracked-prefixes.json", []))
 
     def ticket(self, rec):
         """Space separated keys worth showing, owned ones first."""
@@ -672,17 +704,28 @@ class Daemon:
             finally:
                 self.pr_queued.discard(key)
 
-    def ticket_text(self, tickets):
-        """Ticket keys, struck through once Jira reports them done; status is looked up in the background."""
-        keys = []
-        for key in tickets.split():
+    def shown_tickets(self, rows):
+        """(keys to show, number of mentioned keys left out). A ticket is shown once Jira has confirmed it exists."""
+        keys, mentioned = session_tickets.display(rows)
+        return self.checked_tickets(keys), mentioned
+
+    def checked_tickets(self, keys):
+        """Queue a lookup for every key that is due one, and return those Jira has confirmed exist."""
+        checked = []
+        for key in keys:
             cached = self.ticket_status.get(key)
             max_age = TICKET_DONE_REFRESH_SECS if cached and cached["done"] else TICKET_REFRESH_SECS
             if (not cached or time.time() - cached["at"] > max_age) and key not in self.ticket_queued:
                 self.ticket_queued.add(key)
                 self.ticket_queue.put(key)
-            keys.append(github_prs.strike(key) if cached and cached["done"] else key)
-        return " ".join(keys)
+            if cached and cached["ok_at"] and not cached.get("missing"):
+                checked.append(key)
+        # Done tickets last; sorted() keeps the existing order otherwise.
+        return sorted(checked, key=lambda key: self.ticket_status[key]["done"])
+
+    def ticket_text(self, keys):
+        """Ticket keys, struck through once Jira reports them done."""
+        return " ".join(github_prs.strike(key) if self.ticket_status[key]["done"] else key for key in keys)
 
     def ticket_loop(self):
         while True:
@@ -691,12 +734,34 @@ class Daemon:
             try:
                 self.ticket_status[key] = {"done": jira_status.is_done(key), "at": time.time(), "ok_at": time.time()}
                 self.dirty.set()
+            except jira_status.TicketNotFound:
+                self.ticket_status[key] = {"done": False, "missing": True, "at": time.time(), "ok_at": time.time()}
+                self.dirty.set()
             except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as e:
                 log("ticket lookup failed for %s: %s" % (key, e))
+                self.ask_for_jira_login(e)
                 # Keep any previous status and wait out the refresh interval before retrying.
-                self.ticket_status[key] = {"done": previous["done"], "at": time.time(), "ok_at": previous.get("ok_at", 0)}
+                self.ticket_status[key] = {"done": previous["done"], "at": time.time(), "ok_at": previous.get("ok_at", 0), "missing": previous.get("missing", False)}
             finally:
                 self.ticket_queued.discard(key)
+
+    def ask_for_jira_login(self, error):
+        if isinstance(error, jira_status.LoginRequired) and jira_status.start_login():
+            notify("Jira login needed", "Log in to Jira in the popup so ticket status keeps working.")
+
+    def projects_loop(self):
+        while True:
+            if time.time() - self.projects.get("at", 0) > PROJECTS_REFRESH_SECS:
+                try:
+                    self.projects = {"keys": jira_status.project_keys(), "at": time.time()}
+                    save_json("jira-projects.json", self.projects)
+                    self.dirty.set()
+                except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as e:
+                    log("project lookup failed: %s" % e)
+                    self.ask_for_jira_login(e)
+                    time.sleep(PROJECTS_RETRY_SECS)
+                    continue
+            time.sleep(PROJECTS_REFRESH_SECS)
 
     def summary_loop(self):
         while True:
@@ -739,6 +804,7 @@ class Daemon:
         threading.Thread(target=self.summary_loop, daemon=True).start()
         threading.Thread(target=self.pr_loop, daemon=True).start()
         threading.Thread(target=self.ticket_loop, daemon=True).start()
+        threading.Thread(target=self.projects_loop, daemon=True).start()
         while True:
             if self.dirty.wait(TICK_SECS):
                 time.sleep(DEBOUNCE_SECS)

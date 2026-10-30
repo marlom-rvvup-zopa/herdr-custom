@@ -1,3 +1,4 @@
+import curses
 import os
 import sys
 import unittest
@@ -27,6 +28,8 @@ class QuickTuiTest(unittest.TestCase):
             mock.patch.object(quick_tui, "focused_agent", return_value=AGENT),
             mock.patch.object(quick_tui, "settle", side_effect=lambda agent: self.calls.append(("settle", agent["pane_id"]))),
             mock.patch.object(quick_tui, "snooze", side_effect=lambda agent, secs: self.calls.append(("snooze", secs))),
+            mock.patch.object(quick_tui, "new_claude_tab", side_effect=lambda: self.calls.append(("new tab",))),
+            mock.patch.object(quick_tui, "new_claude_pane", side_effect=lambda: self.calls.append(("new pane",))),
             mock.patch.object(quick_tui, "draw", side_effect=lambda screen, title, lines, cursor, message: self.messages.append(message)),
             mock.patch.object(quick_tui.curses, "curs_set"),
             mock.patch.object(quick_tui.curses, "set_escdelay"),
@@ -54,6 +57,43 @@ class QuickTuiTest(unittest.TestCase):
         self.press("s", 27, "q")
         self.assertEqual(self.calls, [])
 
+    def test_n_opens_a_new_claude_tab(self):
+        self.press("n")
+        self.assertEqual(self.calls, [("new tab",)])
+
+    def test_arrows_move_to_an_item_and_enter_runs_it(self):
+        self.press(curses.KEY_DOWN, curses.KEY_DOWN, 10)
+        self.assertEqual(self.calls, [("settle", "w1:p1")])
+
+    def test_one_arrow_down_reaches_the_new_pane(self):
+        self.press(curses.KEY_DOWN, 10)
+        self.assertEqual(self.calls, [("new pane",)])
+
+    def test_j_and_k_move_too(self):
+        self.press("j", "j", "j", "k", 10)
+        self.assertEqual(self.calls, [("settle", "w1:p1")])
+
+    def test_the_cursor_stops_at_the_last_item(self):
+        self.press("j", "j", "j", "j", "j", 10, 27, "q")
+        self.assertEqual(self.calls, [])
+
+    def test_leaving_the_snooze_menu_from_its_last_choice_keeps_the_main_menu_usable(self):
+        self.press("s", "j", "j", "j", 27, 10)
+        self.assertEqual(self.calls, [("new tab",)])
+
+    def test_p_opens_a_new_claude_pane(self):
+        self.press("p")
+        self.assertEqual(self.calls, [("new pane",)])
+
+    def test_p_still_opens_a_pane_when_the_focused_pane_has_no_agent(self):
+        with mock.patch.object(quick_tui, "focused_agent", side_effect=LookupError("no agent in the focused pane")):
+            self.press("p")
+        self.assertEqual(self.calls, [("new pane",)])
+
+    def test_enter_on_the_first_item_opens_a_new_tab(self):
+        self.press(10)
+        self.assertEqual(self.calls, [("new tab",)])
+
     def test_q_cancels(self):
         self.press("q")
         self.assertEqual(self.calls, [])
@@ -65,9 +105,37 @@ class QuickTuiTest(unittest.TestCase):
 
     def test_no_agent_in_the_focused_pane_is_reported(self):
         with mock.patch.object(quick_tui, "focused_agent", side_effect=LookupError("no agent in the focused pane")):
-            self.press("x")
+            self.press("c", "q")
         self.assertEqual(self.calls, [])
-        self.assertIn("no agent in the focused pane", self.messages)
+        self.assertEqual(self.messages, ["no agent in the focused pane", "no agent in the focused pane"])
+
+    def test_n_still_opens_a_new_tab_when_the_focused_pane_has_no_agent(self):
+        with mock.patch.object(quick_tui, "focused_agent", side_effect=LookupError("no agent in the focused pane")):
+            self.press("n")
+        self.assertEqual(self.calls, [("new tab",)])
+
+
+class NewClaudeTabTest(unittest.TestCase):
+    def test_opens_a_focused_tab_in_the_pane_workspace_and_runs_claude(self):
+        pane = {"workspace_id": "w1", "cwd": "/repo"}
+        replies = [{"pane": pane}, {"root_pane": {"pane_id": "w1:p7"}}, {}]
+        with mock.patch.dict(os.environ, {"QUICK_PANE_ID": "w1:p1"}), mock.patch.object(quick_tui, "herdr_cli", side_effect=replies) as cli:
+            quick_tui.new_claude_tab()
+        self.assertEqual(
+            [c.args for c in cli.call_args_list],
+            [("pane", "get", "w1:p1"), ("tab", "create", "--workspace", "w1", "--cwd", "/repo", "--focus"), ("pane", "run", "w1:p7", "claude")],
+        )
+
+
+class NewClaudePaneTest(unittest.TestCase):
+    def test_splits_the_focused_pane_to_the_right_and_runs_claude(self):
+        replies = [{"pane": {"cwd": "/repo"}}, {"pane": {"pane_id": "w1:p7"}}, {}]
+        with mock.patch.dict(os.environ, {"QUICK_PANE_ID": "w1:p1"}), mock.patch.object(quick_tui, "herdr_cli", side_effect=replies) as cli:
+            quick_tui.new_claude_pane()
+        self.assertEqual(
+            [c.args for c in cli.call_args_list],
+            [("pane", "get", "w1:p1"), ("pane", "split", "w1:p1", "--direction", "right", "--cwd", "/repo", "--focus"), ("pane", "run", "w1:p7", "claude")],
+        )
 
 
 class FocusedAgentTest(unittest.TestCase):

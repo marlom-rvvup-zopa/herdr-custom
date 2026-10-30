@@ -8,6 +8,9 @@ platforms = ["macos", "linux"]
 [[startup]]
 command = ["python3", "daemon.py"]
 
+[[startup]]
+command = ["python3", "no_sleep.py", "hold"]
+
 [[events]]
 on = "pane.agent_detected"
 command = ["python3", "daemon.py", "--ensure"]
@@ -51,7 +54,7 @@ command = ["python3", "daemon.py", "--restart"]
 [[actions]]
 id = "quick-actions"
 title = "Quick actions"
-description = "Close/settle or snooze the focused agent from a small popup."
+description = "Close/settle or snooze the focused agent, or open claude in a new tab or pane, from a small popup."
 command = ["python3", "actions.py", "quick-actions"]
 
 [[panes]]
@@ -59,8 +62,16 @@ id = "quick"
 title = "Quick actions"
 placement = "popup"
 width = 46
-height = 10
+height = 13
 command = ["python3", "quick_tui.py"]
+
+[[panes]]
+id = "jira-login"
+title = "Jira login"
+placement = "popup"
+width = 70
+height = 16
+command = ["acli", "jira", "auth", "login", "--web"]
 
 [[panes]]
 id = "inbox"
@@ -69,3 +80,9 @@ placement = "popup"
 width = "85%"
 height = "70%"
 command = ["python3", "inbox_tui.py"]
+
+[[actions]]
+id = "toggle-no-sleep"
+title = "Toggle no sleep"
+description = "Turn no sleep off, or back on. It starts on with herdr: caffeinate keeps the Mac awake and the terminal window title shows a coffee mug."
+command = ["python3", "no_sleep.py", "toggle"]

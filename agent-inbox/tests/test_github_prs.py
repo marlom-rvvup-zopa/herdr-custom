@@ -51,5 +51,19 @@ class WorkedPrUrlsTest(unittest.TestCase):
         self.assertEqual(self.urls(*entries), [URL % 1])
 
 
+class TokensTest(unittest.TestCase):
+    PRS = [{"number": 1, "state": "OPEN", "statusCheckRollup": []}, {"number": 2, "state": "MERGED", "statusCheckRollup": []}]
+
+    def test_tokens_use_the_given_names(self):
+        out = github_prs.tokens(self.PRS, "I", github_prs.PR_LINE_TOKENS)
+        self.assertEqual({k: v for k, v in out.items() if v}, {"prl_open": "I #1", "prl_merged": github_prs.strike("#2")})
+
+    def test_live_prs_come_before_merged_and_closed_ones(self):
+        self.assertEqual(list(github_prs.PR_TOKENS.values())[-2:], ["pr_merged", "pr_closed"])
+
+    def test_no_prs_leaves_every_token_empty(self):
+        self.assertEqual(set(github_prs.tokens([], "I", github_prs.PR_LINE_TOKENS).values()), {None})
+
+
 if __name__ == "__main__":
     unittest.main()
