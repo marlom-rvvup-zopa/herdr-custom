@@ -117,34 +117,41 @@ class QuickTuiTest(unittest.TestCase):
 
 class NewClaudeTabTest(unittest.TestCase):
     def test_opens_a_focused_tab_in_the_pane_workspace_and_runs_claude(self):
-        pane = {"workspace_id": "w1", "cwd": "/repo"}
-        replies = [{"pane": pane}, {"root_pane": {"pane_id": "w1:p7"}}, {}]
-        with mock.patch.dict(os.environ, {"QUICK_PANE_ID": "w1:p1"}), mock.patch.object(quick_tui, "herdr_cli", side_effect=replies) as cli:
+        replies = [{"pane": {"workspace_id": "w1", "cwd": "/repo"}}, {"root_pane": {"pane_id": "w1:p7"}}, {}]
+        with mock.patch.dict(os.environ, {"HERDR_ACTIVE_PANE_ID": "w1:p1"}), mock.patch.object(quick_tui, "herdr_request", side_effect=replies) as request:
             quick_tui.new_claude_tab()
         self.assertEqual(
-            [c.args for c in cli.call_args_list],
-            [("pane", "get", "w1:p1"), ("tab", "create", "--workspace", "w1", "--cwd", "/repo", "--focus"), ("pane", "run", "w1:p7", "claude")],
+            [c.args for c in request.call_args_list],
+            [
+                ("pane.get", {"pane_id": "w1:p1"}),
+                ("tab.create", {"workspace_id": "w1", "cwd": "/repo", "focus": True}),
+                ("pane.send_input", {"pane_id": "w1:p7", "text": "claude", "keys": ["enter"]}),
+            ],
         )
 
 
 class NewClaudePaneTest(unittest.TestCase):
     def test_splits_the_focused_pane_to_the_right_and_runs_claude(self):
         replies = [{"pane": {"cwd": "/repo"}}, {"pane": {"pane_id": "w1:p7"}}, {}]
-        with mock.patch.dict(os.environ, {"QUICK_PANE_ID": "w1:p1"}), mock.patch.object(quick_tui, "herdr_cli", side_effect=replies) as cli:
+        with mock.patch.dict(os.environ, {"HERDR_ACTIVE_PANE_ID": "w1:p1"}), mock.patch.object(quick_tui, "herdr_request", side_effect=replies) as request:
             quick_tui.new_claude_pane()
         self.assertEqual(
-            [c.args for c in cli.call_args_list],
-            [("pane", "get", "w1:p1"), ("pane", "split", "w1:p1", "--direction", "right", "--cwd", "/repo", "--focus"), ("pane", "run", "w1:p7", "claude")],
+            [c.args for c in request.call_args_list],
+            [
+                ("pane.get", {"pane_id": "w1:p1"}),
+                ("pane.split", {"direction": "right", "target_pane_id": "w1:p1", "cwd": "/repo", "focus": True}),
+                ("pane.send_input", {"pane_id": "w1:p7", "text": "claude", "keys": ["enter"]}),
+            ],
         )
 
 
 class FocusedAgentTest(unittest.TestCase):
     def test_finds_the_agent_by_pane(self):
-        with mock.patch.dict(os.environ, {"QUICK_PANE_ID": "w1:p1"}), mock.patch.object(quick_tui, "herdr_request", return_value={"agents": [AGENT]}):
+        with mock.patch.dict(os.environ, {"HERDR_ACTIVE_PANE_ID": "w1:p1"}), mock.patch.object(quick_tui, "herdr_request", return_value={"agents": [AGENT]}):
             self.assertEqual(quick_tui.focused_agent()["pane_id"], "w1:p1")
 
     def test_missing_agent_raises(self):
-        with mock.patch.dict(os.environ, {"QUICK_PANE_ID": "w1:p9"}), mock.patch.object(quick_tui, "herdr_request", return_value={"agents": [AGENT]}):
+        with mock.patch.dict(os.environ, {"HERDR_ACTIVE_PANE_ID": "w1:p9"}), mock.patch.object(quick_tui, "herdr_request", return_value={"agents": [AGENT]}):
             with self.assertRaises(LookupError):
                 quick_tui.focused_agent()
 

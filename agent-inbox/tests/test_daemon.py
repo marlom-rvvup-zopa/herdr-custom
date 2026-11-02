@@ -92,9 +92,10 @@ class ReportTest(DaemonTest):
         patcher = mock.patch.object(self.daemon, "session_prs", return_value=[])
         patcher.start()
         self.addCleanup(patcher.stop)
-        patcher = mock.patch.object(self.daemon, "hint", return_value=None)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name in ("hint", "has_shell"):
+            patcher = mock.patch.object(self.daemon, name, return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.calls = []
         self.check("PAY-1", "PAY-8", "PAY-9")
 
@@ -171,6 +172,40 @@ class TicketCheckTest(TicketTest):
             with self.assertRaises(SystemExit):
                 self.daemon.ticket_loop()
         self.assertTrue(self.daemon.ticket_status["QS-2"]["missing"])
+
+
+class ShellMarkTest(DaemonTest):
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        patcher = mock.patch.object(daemon, "herdr_request", self.capture)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.rec = agent("a", "idle", agent_session={"kind": "id", "value": "s1"})
+        self.layout = daemon.layouts([self.rec], {"a": {"last_used": 1, "unseen_done": False}}, {}, set(), set())["a"]
+
+    def capture(self, method, params, timeout=10.0):
+        self.calls.append((method, params))
+        if method == "pane.process_info":
+            return {"process_info": {"foreground_process_group_id": 74565}}
+        return {}
+
+    def mark(self, shell_parents):
+        self.daemon.shell_parents = shell_parents
+        with mock.patch.object(daemon.native_subs, "running", return_value=[]), mock.patch.object(self.daemon, "session_prs", return_value=[]):
+            self.daemon.report_extra(self.rec, self.layout)
+        return next(p["tokens"] for m, p in self.calls if m == "pane.report_metadata")["shell_mark"]
+
+    def test_agent_whose_claude_has_a_shell_shows_the_terminal_icon(self):
+        self.assertEqual(self.mark({74565}), daemon.SHELL_ICON)
+
+    def test_agent_without_a_shell_shows_nothing(self):
+        self.assertIsNone(self.mark({1}))
+
+    def test_other_agents_than_claude_are_not_looked_up(self):
+        self.rec["agent"] = "codex"
+        self.mark({74565})
+        self.assertNotIn("pane.process_info", [m for m, _ in self.calls])
 
 
 class PrLineTest(ReportTest):

@@ -28,6 +28,7 @@ import time
 import github_prs
 import jira_status
 import native_subs
+import shells
 import auto_settle
 import tab_titles
 import tickets as session_tickets
@@ -50,6 +51,8 @@ NATIVE_ROWS = 4
 PANE_TITLES_KEPT = 20
 # Shown after the status of an agent that came back from a snooze and has not been touched since.
 SNOOZE_ICON = BLANK + chr(0xf068e)
+# nf-fa-terminal, drawn after the status while the agent has a shell running.
+SHELL_ICON = chr(0xf120)
 NATIVE_TOKENS = ["native_%d" % n for n in range(1, NATIVE_ROWS + 1)]
 PR_ICON = chr(0xf407)
 PR_REFRESH_SECS = 120
@@ -333,6 +336,7 @@ class Daemon:
         self.prs = {}
         self.pr_queue = queue.Queue()
         self.pr_queued = set()
+        self.shell_parents = set()
 
     def assert_view(self):
         herdr_request(
@@ -379,6 +383,7 @@ class Daemon:
         links = load_json("subagents.json", {})
         agents = self.archive_stale(agents, links, now)
         woken = self.update_woken(agents, now)
+        self.shell_parents = shells.running_parents()
         layout = layouts(agents, self.state, links, set(load_json("collapsed.json", [])), woken)
         for rec in agents:
             self.report(rec, self.state[rec["terminal_id"]], now, layout[rec["terminal_id"]])
@@ -504,11 +509,12 @@ class Daemon:
         return fresh
 
     def report_extra(self, rec, layout):
-        """Tokens beyond the 16 one report can hold: native sub agent rows, the snooze mark and the PR row used when it is split from the tickets."""
+        """Tokens beyond the 16 one report can hold: native sub agent rows, the shell mark, the snooze mark and the PR row used when it is split from the tickets."""
         session = rec.get("agent_session") or {}
         is_claude = rec["agent"] == "claude" and session.get("kind") == "id"
         tokens = native_tokens(native_subs.running(session["value"]) if is_claude else [], layout)
         tokens["snooze_mark"] = SNOOZE_ICON if layout["woken"] else None
+        tokens["shell_mark"] = SHELL_ICON if is_claude and self.has_shell(rec) else None
         prs = self.session_prs(rec)
         split = pr_line_split(self.shown_tickets(self.ticket_rows(rec))[0], prs)
         tokens.update(github_prs.tokens(prs if split else [], PR_ICON, github_prs.PR_LINE_TOKENS))
@@ -521,6 +527,11 @@ class Daemon:
             return
         herdr_request("pane.report_metadata", params)
         self.reported[key] = params
+
+    def has_shell(self, rec):
+        """True when the agent's claude process has a shell command running, in the foreground or the background."""
+        claude_pid = herdr_request("pane.process_info", {"pane_id": rec["pane_id"]})["process_info"]["foreground_process_group_id"]
+        return claude_pid in self.shell_parents
 
     def report(self, rec, st, now, layout):
         shown = layout["status"]

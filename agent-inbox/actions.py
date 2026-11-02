@@ -86,16 +86,6 @@ def toggle_subs():
     return 0
 
 
-def quick_actions():
-    """Open the small close/snooze popup for the focused agent."""
-    pane_id = focused_pane_id()
-    if not pane_id:
-        notify("Quick actions", "No focused pane.")
-        return 1
-    argv = [os.environ.get("HERDR_BIN_PATH", "herdr"), "plugin", "pane", "open", "--plugin", "marlom.agent-inbox", "--entrypoint", "quick", "--env", "QUICK_PANE_ID=" + pane_id, "--focus"]
-    return subprocess.run(argv, check=False).returncode
-
-
 def explain_tickets():
     """Print each agent's tickets with their role and the signals behind it, as last seen by the daemon."""
     links = load_json("links.json", {})
@@ -119,10 +109,10 @@ def explain_settle():
     return 0
 
 
-ACTIONS = {"settle": settle, "open-ticket": open_ticket, "open-pr": open_pr, "toggle-subs": toggle_subs, "explain-tickets": explain_tickets, "explain-settle": explain_settle, "quick-actions": quick_actions}
+ACTIONS = {"settle": settle, "open-ticket": open_ticket, "open-pr": open_pr, "toggle-subs": toggle_subs, "explain-tickets": explain_tickets, "explain-settle": explain_settle}
 
 if __name__ == "__main__":
     action = ACTIONS.get(sys.argv[1] if len(sys.argv) > 1 else "")
     if not action:
-        sys.exit("usage: actions.py settle|open-ticket|open-pr|toggle-subs|explain-tickets|explain-settle|quick-actions")
+        sys.exit("usage: actions.py settle|open-ticket|open-pr|toggle-subs|explain-tickets|explain-settle")
     sys.exit(action())

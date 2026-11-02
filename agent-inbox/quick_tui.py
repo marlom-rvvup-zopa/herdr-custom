@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Quick menu, without opening the inbox. Claude: n new tab · p new pane to the right. Inbox: c close and settle · s snooze. Arrows or the shortcut keys; q cancels.
 
-Opened by the quick-actions action, which passes the focused pane in QUICK_PANE_ID.
+Opened by a popup key binding, which herdr gives the focused pane in HERDR_ACTIVE_PANE_ID.
 """
 
 import curses
@@ -10,7 +10,7 @@ import os
 import time
 
 import inbox_tui
-from lib import SNOOZE_CHOICES, CannotShelve, herdr_cli, herdr_request, shelve
+from lib import SNOOZE_CHOICES, CannotShelve, herdr_request, shelve
 
 # Nerd font icons: nf-cod-claude, nf-md-inbox, nf-md-tab_plus, nf-md-view_split_vertical, nf-md-check, nf-md-sleep.
 GROUPS = [
@@ -22,26 +22,30 @@ NO_AGENT = "no agent in the focused pane"
 
 
 def focused_agent():
-    pane_id = os.environ.get("QUICK_PANE_ID")
+    pane_id = os.environ["HERDR_ACTIVE_PANE_ID"]
     agent = next((a for a in herdr_request("agent.list", {})["agents"] if a["pane_id"] == pane_id), None)
     if not agent:
         raise LookupError(NO_AGENT)
     return agent
 
 
+def run_claude(pane_id):
+    herdr_request("pane.send_input", {"pane_id": pane_id, "text": "claude", "keys": ["enter"]})
+
+
 def new_claude_tab():
     """Open a focused tab running claude, in the workspace and directory of the focused pane."""
-    pane = herdr_cli("pane", "get", os.environ["QUICK_PANE_ID"])["pane"]
-    root = herdr_cli("tab", "create", "--workspace", pane["workspace_id"], "--cwd", pane["cwd"], "--focus")["root_pane"]
-    herdr_cli("pane", "run", root["pane_id"], "claude")
+    pane = herdr_request("pane.get", {"pane_id": os.environ["HERDR_ACTIVE_PANE_ID"]})["pane"]
+    root = herdr_request("tab.create", {"workspace_id": pane["workspace_id"], "cwd": pane["cwd"], "focus": True})["root_pane"]
+    run_claude(root["pane_id"])
 
 
 def new_claude_pane():
     """Split the focused pane to its right and run claude there, in the same directory."""
-    pane_id = os.environ["QUICK_PANE_ID"]
-    cwd = herdr_cli("pane", "get", pane_id)["pane"]["cwd"]
-    new = herdr_cli("pane", "split", pane_id, "--direction", "right", "--cwd", cwd, "--focus")["pane"]
-    herdr_cli("pane", "run", new["pane_id"], "claude")
+    pane_id = os.environ["HERDR_ACTIVE_PANE_ID"]
+    cwd = herdr_request("pane.get", {"pane_id": pane_id})["pane"]["cwd"]
+    new = herdr_request("pane.split", {"direction": "right", "target_pane_id": pane_id, "cwd": cwd, "focus": True})["pane"]
+    run_claude(new["pane_id"])
 
 
 def settle(agent):
