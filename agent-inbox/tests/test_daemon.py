@@ -9,6 +9,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import daemon
+import github_prs
 import lib
 
 NOW = 1_000_000.0
@@ -115,6 +116,28 @@ class ReportTest(DaemonTest):
         line = self.calls[0][1]["tokens"]["ticket_line"]
         self.assertEqual((line.endswith("PAY-1 +2"), "PAY-8" in line), (True, False))
 
+    def sidebar_ticket_line(self, rows, done):
+        rec = agent("a", "idle", agent_session={"kind": "id", "value": "s1"}, terminal_title_stripped="T")
+        for key in done:
+            self.daemon.ticket_status[key]["done"] = True
+        layout = daemon.layouts([rec], {"a": {"last_used": 1, "status": "idle", "unseen_done": False}}, {}, set(), set())["a"]
+        with mock.patch.object(self.daemon, "ticket_rows", return_value=rows):
+            self.daemon.report(rec, {"last_used": 1, "status": "idle", "unseen_done": False}, NOW, layout)
+        return self.calls[0][1]["tokens"]["ticket_line"]
+
+    def test_done_tickets_are_counted_instead_of_listed(self):
+        rows = [{"key": key, "role": "primary", "sources": []} for key in ("PAY-1", "PAY-8", "PAY-9")]
+        line = self.sidebar_ticket_line(rows, ["PAY-8", "PAY-9"])
+        self.assertEqual((line.endswith("PAY-1 +2"), "PAY-8" in line), (True, False))
+
+    def test_done_tickets_add_to_the_mention_count(self):
+        rows = [{"key": "PAY-1", "role": "primary", "sources": []}, {"key": "PAY-8", "role": "primary", "sources": []}, {"key": "PAY-9", "role": "mentioned", "sources": []}]
+        self.assertTrue(self.sidebar_ticket_line(rows, ["PAY-8"]).endswith("PAY-1 +2"))
+
+    def test_only_done_tickets_show_just_the_count(self):
+        rows = [{"key": key, "role": "primary", "sources": []} for key in ("PAY-1", "PAY-8")]
+        self.assertTrue(self.sidebar_ticket_line(rows, ["PAY-1", "PAY-8"]).endswith(" +2"))
+
     def test_waiting_parent_is_reported_through_the_working_token(self):
         parent, child = agent("p", "idle", terminal_title_stripped="T"), agent("c", "working")
         state = {"p": {"last_used": 1, "status": "idle", "unseen_done": False}, "c": {"last_used": 2, "status": "working", "unseen_done": False}}
@@ -208,33 +231,77 @@ class ShellMarkTest(DaemonTest):
         self.assertNotIn("pane.process_info", [m for m, _ in self.calls])
 
 
-class PrLineTest(ReportTest):
-    PRS = [{"number": n, "state": "OPEN", "statusCheckRollup": [], "url": "u%d" % n} for n in (1, 2, 3)]
+def open_pr(number, state="OPEN"):
+    return {"number": number, "state": state, "statusCheckRollup": [], "url": "u%d" % number}
 
-    def tokens(self, ticket_count, pr_count):
+
+class LinkRowsTest(unittest.TestCase):
+    def test_everything_that_fits_stays_on_the_first_row(self):
+        first, *rest = daemon.link_rows(["PAY-1", "PAY-2"], [open_pr(1), open_pr(2)], 40)
+        self.assertEqual((first["ticket"], len(first["pr"]), rest), (["PAY-1", "PAY-2"], 2, [{"ticket": [], "pr": []}] * 3))
+
+    def test_tickets_that_do_not_fit_wrap_onto_the_second_row(self):
+        first, second, *_ = daemon.link_rows(["PAY-1", "PAY-2", "PAY-3"], [], 16)
+        self.assertEqual((first["ticket"], second["ticket"]), (["PAY-1", "PAY-2"], ["PAY-3"]))
+
+    def test_prs_that_do_not_fit_wrap_after_the_tickets(self):
+        first, second, *_ = daemon.link_rows(["PAY-1", "PAY-2"], [open_pr(1), open_pr(2)], 18)
+        self.assertEqual((first["ticket"], first["pr"], second["pr"]), (["PAY-1", "PAY-2"], [], [open_pr(1), open_pr(2)]))
+
+    def test_prs_are_ordered_like_their_tokens(self):
+        merged, live = open_pr(1, "MERGED"), open_pr(2)
+        first, *_ = daemon.link_rows([], [merged, live], 40)
+        self.assertEqual(first["pr"], [live, merged])
+
+    def test_combining_strike_marks_take_no_room(self):
+        first, *_ = daemon.link_rows([github_prs.strike("PAY-1"), github_prs.strike("PAY-2")], [], 14)
+        self.assertEqual(len(first["ticket"]), 2)
+
+    def test_prs_keep_wrapping_onto_further_rows(self):
+        prs = [open_pr(n) for n in range(10, 16)]
+        rows = daemon.link_rows([], prs, 14)
+        self.assertEqual([len(row["pr"]) for row in rows], [3, 3, 0, 0])
+
+    def test_what_overflows_the_last_row_stays_on_it(self):
+        rows = daemon.link_rows(["PAY-1", "PAY-2", "PAY-3", "PAY-4", "PAY-5"], [], 10)
+        self.assertEqual(rows[-1]["ticket"], ["PAY-4", "PAY-5"])
+
+
+class PrLineTest(ReportTest):
+    def tokens(self, ticket_count, pr_count, width, numbers=(1, 2, 3)):
         rows = [{"key": "PAY-%d" % n, "role": "primary", "sources": []} for n in range(ticket_count)]
         self.check(*[row["key"] for row in rows])
         rec = agent("a", "idle", agent_session={"kind": "id", "value": "s1"}, terminal_title_stripped="T")
         state = {"a": {"last_used": 1, "status": "idle", "unseen_done": False}}
         layout = daemon.layouts([rec], state, {}, set(), set())["a"]
-        with mock.patch.object(self.daemon, "ticket_rows", return_value=rows), mock.patch.object(self.daemon, "session_prs", return_value=self.PRS[:pr_count]):
+        prs = [open_pr(n) for n in numbers][:pr_count]
+        with mock.patch.object(daemon, "LINK_ROW_WIDTH", width), mock.patch.object(self.daemon, "ticket_rows", return_value=rows), mock.patch.object(self.daemon, "session_prs", return_value=prs):
             self.daemon.report(rec, state["a"], NOW, layout)
             self.daemon.report_extra(rec, layout)
         main = next(p["tokens"] for m, p in self.calls if p["source"] == daemon.SOURCE)
         extra = next(p["tokens"] for m, p in self.calls if p["source"] == daemon.NATIVE_SOURCE)
+        self.more = next(p["tokens"] for m, p in self.calls if p["source"] == daemon.LINKS_SOURCE)
         return main, extra
 
-    def test_three_tickets_and_three_prs_put_the_prs_on_their_own_row(self):
-        main, extra = self.tokens(3, 3)
+    def test_links_that_fit_share_the_first_row(self):
+        main, extra = self.tokens(2, 3, 60)
+        self.assertEqual((main["pr_open"].endswith("#1 #2 #3"), extra["prl_open"], extra["ticket_line2"]), (True, None, None))
+
+    def test_prs_that_do_not_fit_next_to_the_tickets_get_the_second_row(self):
+        main, extra = self.tokens(3, 3, 24)
         self.assertEqual((main["pr_open"], extra["prl_open"].endswith("#1 #2 #3")), (None, True))
 
-    def test_two_tickets_keep_the_prs_next_to_them(self):
-        main, extra = self.tokens(2, 3)
-        self.assertEqual((main["pr_open"].endswith("#1 #2 #3"), extra["prl_open"]), (True, None))
+    def test_tickets_that_do_not_fit_continue_on_the_second_row(self):
+        main, extra = self.tokens(4, 0, 16)
+        self.assertEqual((main["ticket_line"].endswith("PAY-0 PAY-1"), extra["ticket_line2"].endswith("PAY-2 PAY-3")), (True, True))
 
-    def test_two_prs_keep_them_next_to_the_tickets(self):
-        main, extra = self.tokens(3, 2)
-        self.assertEqual((main["pr_open"].endswith("#1 #2"), extra["prl_open"]), (True, None))
+    def test_prs_that_overflow_the_second_row_continue_in_the_third_and_fourth(self):
+        self.tokens(0, 9, 14, numbers=range(10, 19))
+        self.assertEqual((self.more["pr3_open"].endswith("#16 #17 #18"), self.more["pr4_open"]), (True, None))
+
+    def test_further_rows_are_reported_in_a_source_of_their_own(self):
+        self.tokens(0, 1, 40)
+        self.assertEqual(sorted(self.more), sorted(["ticket_line3", "ticket_line4", *github_prs.PR_ROW_TOKENS[2].values(), *github_prs.PR_ROW_TOKENS[3].values()]))
 
 
 class RenameClearedSessionTest(DaemonTest):
@@ -559,3 +626,86 @@ class ArchiveStaleTest(DaemonTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WakeDueTest(DaemonTest):
+    ENTRY = {"agent": "claude", "session": "s1", "cwd": "/p/x", "title": "Fix it", "wake_at": NOW - 1, "snoozed_at": NOW - 3600, "shelved_at": NOW - 3600}
+
+    def setUp(self):
+        super().setUp()
+        self.resumed, self.notified = [], []
+        self.prs = [{"number": 9, "state": "MERGED"}]
+        self.done = {"PAY-1": True}
+        scan = daemon.session_tickets.Scan()
+        scan.prompts = ["Fix PAY-1"]
+        patches = {
+            "resume": lambda entry, focus: self.resumed.append(entry["session"]) or "t1",
+            "notify": lambda title, body=None: self.notified.append((title, body)),
+        }
+        for name, value in patches.items():
+            patcher = mock.patch.object(daemon, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        for target, name, value in (
+            (daemon.github_prs, "session_prs", lambda cwd, session_id: self.prs),
+            (daemon.jira_status, "is_done", lambda key: self.done[key]),
+            (self.daemon, "session_scan", lambda rec: scan),
+        ):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        lib.save_json("snoozed.json", [self.ENTRY])
+
+    def wake(self):
+        self.daemon.wake_due(NOW)
+
+    def test_session_with_merged_prs_and_done_tickets_is_settled_instead_of_resumed(self):
+        self.wake()
+        self.assertEqual((self.resumed, [e["session"] for e in lib.load_json("settled.json", [])]), ([], ["s1"]))
+
+    def test_settled_entry_says_the_snooze_settled_it_and_why(self):
+        self.wake()
+        entry = lib.load_json("settled.json", [])[0]
+        self.assertEqual((entry["settled_by"], entry["settle_reason"], entry["shelved_at"]), ("snooze", "#9 merged, PAY-1 done", NOW))
+
+    def test_settled_entry_leaves_the_snoozed_list(self):
+        self.wake()
+        self.assertEqual(lib.load_json("snoozed.json", []), [])
+
+    def test_settled_entry_drops_its_snooze_times(self):
+        self.wake()
+        self.assertFalse({"wake_at", "snoozed_at"} & set(lib.load_json("settled.json", [])[0]))
+
+    def test_closed_pr_counts_as_finished(self):
+        self.prs = [{"number": 9, "state": "CLOSED"}]
+        self.wake()
+        self.assertEqual(self.resumed, [])
+
+    def test_open_pr_resumes_the_session(self):
+        self.prs = [{"number": 9, "state": "OPEN"}]
+        self.wake()
+        self.assertEqual(self.resumed, ["s1"])
+
+    def test_ticket_not_done_resumes_the_session(self):
+        self.done = {"PAY-1": False}
+        self.wake()
+        self.assertEqual(self.resumed, ["s1"])
+
+    def test_session_without_prs_resumes(self):
+        self.prs = []
+        self.wake()
+        self.assertEqual(self.resumed, ["s1"])
+
+    def test_failed_lookup_resumes_the_session(self):
+        with mock.patch.object(daemon.github_prs, "session_prs", side_effect=RuntimeError("gh down")):
+            self.wake()
+        self.assertEqual(self.resumed, ["s1"])
+
+    def test_entry_not_due_yet_is_not_checked(self):
+        lib.save_json("snoozed.json", [{**self.ENTRY, "wake_at": NOW + 60}])
+        self.wake()
+        self.assertEqual((self.resumed, lib.load_json("settled.json", [])), ([], []))
+
+    def test_settling_tells_the_user(self):
+        self.wake()
+        self.assertEqual(self.notified[0][0], "Settled after snooze")

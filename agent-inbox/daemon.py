@@ -45,8 +45,12 @@ LAST_SUB_MARK = "└─ "
 SUB_GUTTER = "│"
 # Native sub agents are listed on their parent's row, in tokens of their own: one report holds at most 16 tokens.
 NATIVE_SOURCE = "marlom.agent-inbox.native"
-# More tickets and more PRs than this do not share a sidebar row.
-MAX_ON_TICKET_ROW = 2
+# Sources hold 16 tokens each: the main one has the first ticket and PR row, the native one the second, this one the rest.
+LINKS_SOURCE = "marlom.agent-inbox.links"
+TICKET_TOKENS = ["ticket_line", "ticket_line2", "ticket_line3", "ticket_line4"]
+# Cells a sidebar row can show before herdr cuts it with an ellipsis, and the cells an icon and its space take.
+LINK_ROW_WIDTH = 46
+ICON_WIDTH = 3
 NATIVE_ROWS = 4
 PANE_TITLES_KEPT = 20
 # Shown after the status of an agent that came back from a snooze and has not been touched since.
@@ -248,9 +252,26 @@ def continuation_pad(layout):
     return layout["guides"] + gutter + BLANK * (len(mark) - 1)
 
 
-def pr_line_split(ticket_keys, prs):
-    """True when there are too many tickets and PRs for one sidebar row: the PRs then get a row of their own."""
-    return len(ticket_keys) > MAX_ON_TICKET_ROW and len(prs) > MAX_ON_TICKET_ROW
+def display_width(text):
+    return len(text.replace("\u0336", ""))
+
+
+def link_rows(tickets, prs, width):
+    """Tickets, then PRs by state, packed onto the sidebar rows of `width` cells; what overflows the last row stays on it.
+    Each row is {"ticket": ticket texts, "pr": PR dicts}. Every row pays for the icon before its first ticket and first PR."""
+    order = list(github_prs.PR_TOKENS)
+    items = [("ticket", text, text) for text in tickets]
+    items += [("pr", pr, github_prs.pr_text(pr)) for pr in sorted(prs, key=lambda pr: order.index(github_prs.pr_state(pr)))]
+    rows = [{"ticket": [], "pr": []} for _ in TICKET_TOKENS]
+    used, current = 0, 0
+    for kind, item, text in items:
+        needed = display_width(text) + (0 if rows[current][kind] else ICON_WIDTH)
+        if used and used + 1 + needed > width and current < len(rows) - 1:
+            current, used = current + 1, 0
+            needed = display_width(text) + ICON_WIDTH
+        used += needed + (1 if used else 0)
+        rows[current][kind].append(item)
+    return rows
 
 
 def indent_tokens(tokens, layout, shown):
@@ -274,6 +295,12 @@ def indent_tokens(tokens, layout, shown):
     first = next((name for name in row_tokens if tokens[name]), None)
     if first:
         tokens[first] = cont + tokens[first]
+
+
+def link_row_tokens(row, ticket_name, pr_names):
+    tokens = {ticket_name: "%s %s" % (JIRA_ICON, " ".join(row["ticket"])) if row["ticket"] else None}
+    tokens.update(github_prs.tokens(row["pr"], PR_ICON, pr_names))
+    return tokens
 
 
 def native_tokens(subs, layout):
@@ -408,6 +435,10 @@ class Daemon:
         save_json("snoozed.json", [e for e in snoozed if e["wake_at"] > now])
         woken = load_json("woken.json", {})
         for entry in due:
+            verdict = self.finished_work(entry)
+            if verdict.ready:
+                self.settle_snoozed(entry, verdict.reason, now)
+                continue
             try:
                 woken[resume(entry, focus=False)] = now
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as e:
@@ -415,6 +446,37 @@ class Daemon:
                 log("wake failed for %s: %s" % (entry["title"], e))
                 save_json("snoozed.json", load_json("snoozed.json", []) + [{**entry, "wake_at": now + 300}])
         save_json("woken.json", woken)
+
+    def finished_work(self, entry):
+        """Whether the snoozed session's PRs are all merged or closed and the tickets it owns are all done, looked up now.
+        A failed lookup counts as not finished, so the session comes back rather than staying hidden."""
+        rec = {"agent": entry["agent"], "agent_session": {"kind": "id", "value": entry["session"]}}
+        try:
+            prs = github_prs.session_prs(entry["cwd"], entry["session"])
+            found = self.session_scan(rec)
+            rows = session_tickets.classify(found, [p.get("title") for p in prs]) if found else []
+            done = {}
+            for row in rows:
+                if row["role"] != "primary":
+                    continue
+                try:
+                    done[row["key"]] = jira_status.is_done(row["key"])
+                except jira_status.TicketNotFound:
+                    rows = [r for r in rows if r["key"] != row["key"]]
+            return auto_settle.work_verdict(prs, rows, done, closed_unmerged_counts=True)
+        except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as e:
+            log("finished-work check failed for %s: %s" % (entry["title"], e))
+            self.ask_for_jira_login(e)
+            return auto_settle.Verdict(False, "lookup failed")
+
+    def settle_snoozed(self, entry, reason, now):
+        """Move a due snoozed session to the settled list instead of resuming it."""
+        settled = {k: v for k, v in entry.items() if k not in ("wake_at", "snoozed_at")}
+        settled.update(shelved_at=now, settled_by="snooze", settle_reason=reason)
+        kept = [e for e in load_json("settled.json", []) if e["session"] != entry["session"]]
+        save_json("settled.json", [settled] + kept)
+        log("settled %s after snooze: %s" % (entry["session"], reason))
+        notify("Settled after snooze", "%s (%s)" % (entry["title"], reason))
 
     def update_woken(self, agents, now):
         """Terminals back from a snooze that the user has not touched since. Prompting one clears it."""
@@ -509,20 +571,19 @@ class Daemon:
         return fresh
 
     def report_extra(self, rec, layout):
-        """Tokens beyond the 16 one report can hold: native sub agent rows, the shell mark, the snooze mark and the PR row used when it is split from the tickets."""
+        """Tokens beyond the 16 one report can hold: native sub agent rows, the shell mark, the snooze mark and the second ticket and PR row; the rows after it go in a source of their own."""
         session = rec.get("agent_session") or {}
         is_claude = rec["agent"] == "claude" and session.get("kind") == "id"
         tokens = native_tokens(native_subs.running(session["value"]) if is_claude else [], layout)
         tokens["snooze_mark"] = SNOOZE_ICON if layout["woken"] else None
         tokens["shell_mark"] = SHELL_ICON if is_claude and self.has_shell(rec) else None
-        prs = self.session_prs(rec)
-        split = pr_line_split(self.shown_tickets(self.ticket_rows(rec))[0], prs)
-        tokens.update(github_prs.tokens(prs if split else [], PR_ICON, github_prs.PR_LINE_TOKENS))
-        if split and layout["depth"]:
-            first = next(name for name in github_prs.PR_LINE_TOKENS.values() if tokens[name])
-            tokens[first] = continuation_pad(layout) + tokens[first]
-        params = {"pane_id": rec["pane_id"], "source": NATIVE_SOURCE, "tokens": tokens}
-        key = rec["pane_id"] + NATIVE_SOURCE
+        tokens.update(self.link_tokens(rec, layout, [1]))
+        self.report_source(rec, NATIVE_SOURCE, tokens)
+        self.report_source(rec, LINKS_SOURCE, self.link_tokens(rec, layout, [2, 3]))
+
+    def report_source(self, rec, source, tokens):
+        params = {"pane_id": rec["pane_id"], "source": source, "tokens": tokens}
+        key = rec["pane_id"] + source
         if self.reported.get(key) == params:
             return
         herdr_request("pane.report_metadata", params)
@@ -544,14 +605,8 @@ class Daemon:
         tokens["last_reply"] = reply_age(rec["agent_status"], st, now)
         tokens["hint"] = self.hint(rec)
         rows = self.ticket_rows(rec)
-        keys, mentioned = self.shown_tickets(rows)
-        if keys:
-            tokens["ticket_line"] = "%s %s%s" % (JIRA_ICON, self.ticket_text(keys), " +%d" % mentioned if mentioned else "")
-        else:
-            tokens["ticket_line"] = None
         prs = self.session_prs(rec)
-        # Shown by report_extra on a second row when they do not fit next to the tickets.
-        tokens.update(github_prs.tokens([] if pr_line_split(keys, prs) else prs, PR_ICON))
+        tokens.update(self.link_tokens(rec, layout, [0]))
         # Herdr allows 16 tokens per pane, so the actions read links from a file instead.
         self.links[rec["pane_id"]] = {"tickets": [r["key"] for r in rows], "ticket_roles": rows, "pr_urls": [p["url"] for p in prs]}
         hint = tokens["hint"]
@@ -754,9 +809,32 @@ class Daemon:
         # Done tickets last; sorted() keeps the existing order otherwise.
         return sorted(checked, key=lambda key: self.ticket_status[key]["done"])
 
-    def ticket_text(self, keys):
-        """Ticket keys, struck through once Jira reports them done."""
-        return " ".join(github_prs.strike(key) if self.ticket_status[key]["done"] else key for key in keys)
+    def ticket_cells(self, rec):
+        """Ticket keys that are not done yet; the done and mentioned ones are only counted, as a +N after the last."""
+        keys, mentioned = self.shown_tickets(self.ticket_rows(rec))
+        open_keys = [key for key in keys if not self.ticket_status[key]["done"]]
+        hidden = mentioned + len(keys) - len(open_keys)
+        if not hidden:
+            return open_keys
+        if not open_keys:
+            return ["+%d" % hidden]
+        return [*open_keys[:-1], "%s +%d" % (open_keys[-1], hidden)]
+
+    def rows_for(self, rec, layout):
+        indent = len(continuation_pad(layout)) if layout["depth"] else 0
+        return link_rows(self.ticket_cells(rec), self.session_prs(rec), LINK_ROW_WIDTH - indent)
+
+    def link_tokens(self, rec, layout, indexes):
+        """Tokens of the given ticket and PR rows. The first row is indented by indent_tokens, the others here."""
+        rows = self.rows_for(rec, layout)
+        tokens = {}
+        for n in indexes:
+            row = link_row_tokens(rows[n], TICKET_TOKENS[n], github_prs.PR_ROW_TOKENS[n])
+            first = next((name for name in (TICKET_TOKENS[n], *github_prs.PR_ROW_TOKENS[n].values()) if row[name]), None)
+            if first and n and layout["depth"]:
+                row[first] = continuation_pad(layout) + row[first]
+            tokens.update(row)
+        return tokens
 
     def ticket_loop(self):
         while True:

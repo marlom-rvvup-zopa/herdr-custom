@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Inbox popup: open, stale, settled and snoozed agents in tabs.
 
-tab/shift-tab switch tabs · j/k move · enter focus or resume · s snooze · m settle · d forget · q close.
+tab/shift-tab switch tabs · j/k move · enter focus or resume · s snooze · c settle · d forget · q close.
 """
 
 import curses
@@ -9,17 +9,20 @@ import locale
 import os
 import time
 
-from lib import SNOOZE_CHOICES, CannotShelve, forget, herdr_request, is_stale, last_interaction, load_json, resume, save_json, shelve
+from lib import SNOOZE_CHOICES, CannotShelve, forget, herdr_request, is_stale, last_interaction, load_json, resume, save_json, settle, shelve
 
 OPEN, STALE, SETTLED, SNOOZED = range(4)
 # Nerd Font Material Design icons: inbox, archive-clock, archive, alarm-snooze.
 TABS = [(OPEN, chr(0xf0687), "Open"), (STALE, chr(0xf174f), "Stale"), (SETTLED, chr(0xf003c), "Settled"), (SNOOZED, chr(0xf068e), "Snoozed")]
 HINTS = {
-    OPEN: "enter focus · s snooze · m settle · tab next · q close",
+    OPEN: "enter focus · s snooze · c settle · tab next · q close",
     STALE: "enter resume · s snooze · d forget · tab next · q close",
     SETTLED: "enter resume · s snooze · d forget · tab next · q close",
     SNOOZED: "enter wake now · s change time · d forget · tab next · q close",
 }
+# Marks in the column after the status: nf-fa-calendar for a workflow run, nf-md-alarm_snooze for an agent back from a snooze.
+WORKFLOW_ICON = chr(0xf073)
+SNOOZE_ICON = chr(0xf068e)
 STATUS_TOKENS = ("st_working", "st_blocked", "st_done", "st_idle")
 # curses color pair per status token.
 STATUS_COLORS = {"st_working": 1, "st_blocked": 2, "st_done": 3, "st_idle": 4}
@@ -41,6 +44,12 @@ def age(secs):
 
 def fit(text, width):
     return text if len(text) <= width else text[: max(width - 1, 0)] + "…"
+
+
+def mark(rec, woken):
+    if rec["tokens"].get("workflow"):
+        return WORKFLOW_ICON
+    return SNOOZE_ICON if woken else " "
 
 
 def table(headers, rows, width):
@@ -84,11 +93,10 @@ class Inbox:
             while parent in links and depth < 5:
                 parent, depth = links[parent], depth + 1
             title = ("   " * (depth - 1) + "└─ " if depth else "") + (rec.get("terminal_title_stripped") or rec["agent"])
-            mark = chr(0xf068e) if rec["terminal_id"] in woken else " "
             ticket = ", ".join(tickets.get(rec["pane_id"], {}).get("tickets", [])[:2])
             open_rows.append({
                 "key": rec["pane_id"], "rec": rec, "token": token, "stale": is_stale(rec, state.get(rec["terminal_id"], {}).get("last_used", self.now), touched, self.now),
-                "cells": [rec["tokens"].get(token, "") if token else "", mark, age(idle), title, workspaces.get(rec["workspace_id"], ""), ticket],
+                "cells": [rec["tokens"].get(token, "") if token else "", mark(rec, rec["terminal_id"] in woken), age(idle), title, workspaces.get(rec["workspace_id"], ""), ticket],
             })
         self.tabs = {
             OPEN: open_rows,
@@ -113,9 +121,9 @@ class Inbox:
 
 
 def settled_by_cells(entry):
-    """Who settled the session and, for an automatic settle, the evidence it went by."""
-    if entry.get("settled_by") == "auto":
-        return ["auto", entry.get("settle_reason") or ""]
+    """Who settled the session and, unless it was you, the evidence it went by."""
+    if entry.get("settled_by") in ("auto", "snooze"):
+        return [entry["settled_by"], entry.get("settle_reason") or ""]
     return ["you", ""]
 
 
@@ -264,14 +272,18 @@ def run(screen):
             if tab == OPEN:
                 herdr_request("agent.focus", {"target": row["rec"]["pane_id"]})
                 return
-            resume(row["entry"], focus=True)
+            try:
+                resume(row["entry"], focus=True)
+            except RuntimeError as e:
+                message = str(e)
+                continue
             forget({STALE: "stale", SETTLED: "settled", SNOOZED: "snoozed"}[tab], row["entry"]["session"])
             return
         elif key == ord("s"):
             menu = 0
-        elif key == ord("m") and tab == OPEN:
+        elif key == ord("c") and tab == OPEN:
             try:
-                shelve(rows[cursor]["rec"], "settled")
+                settle(rows[cursor]["rec"])
                 message = "Settled."
             except CannotShelve as e:
                 message = str(e)

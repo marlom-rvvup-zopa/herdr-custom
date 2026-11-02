@@ -50,6 +50,13 @@ class WorkedPrUrlsTest(unittest.TestCase):
         entries = [call("a", "gh pr create"), result("a", URL % 1), call("b", "gh pr edit 1"), result("b", URL % 1)]
         self.assertEqual(self.urls(*entries), [URL % 1])
 
+    def test_pr_link_recorded_by_claude_is_found(self):
+        self.assertEqual(self.urls({"type": "pr-link", "sessionId": "s1", "prNumber": 9, "prUrl": URL % 9}), [URL % 9])
+
+    def test_pr_link_and_gh_output_for_same_pr_are_listed_once(self):
+        entries = [call("a", "gh pr create"), result("a", URL % 3), {"type": "pr-link", "prUrl": URL % 3}]
+        self.assertEqual(self.urls(*entries), [URL % 3])
+
 
 class TokensTest(unittest.TestCase):
     PRS = [{"number": 1, "state": "OPEN", "statusCheckRollup": []}, {"number": 2, "state": "MERGED", "statusCheckRollup": []}]

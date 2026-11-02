@@ -34,10 +34,17 @@ def evaluate(rec, unseen_done, last_active, now, in_family, rows, prs, ticket_do
     quiet = now - last_active
     if quiet < quiet_secs:
         return Verdict(False, "active %d min ago, needs %d quiet minutes" % (quiet // 60, quiet_secs // 60))
+    return work_verdict(prs, rows, ticket_done)
+
+
+def work_verdict(prs, rows, ticket_done, closed_unmerged_counts=False):
+    """Ready when there is at least one PR and every one is merged (or closed too, if closed_unmerged_counts),
+    and at least one primary ticket and every one is done."""
     if not prs:
         return Verdict(False, "no PR known")
+    finished = ("MERGED", "CLOSED") if closed_unmerged_counts else ("MERGED",)
     for pr in prs:
-        if pr["state"] != "MERGED":
+        if pr["state"] not in finished:
             return Verdict(False, "PR #%d is %s" % (pr["number"], "closed without merging" if pr["state"] == "CLOSED" else "open"))
     primary = [r["key"] for r in rows if r["role"] == "primary"]
     if not primary:
@@ -47,4 +54,5 @@ def evaluate(rec, unseen_done, last_active, now, in_family, rows, prs, ticket_do
             return Verdict(False, "%s status not looked up yet" % key)
         if not ticket_done[key]:
             return Verdict(False, "%s is not done in Jira" % key)
-    return Verdict(True, "%s merged, %s done" % (", ".join("#%d" % p["number"] for p in prs), ", ".join(primary)))
+    outcome = "merged" if all(p["state"] == "MERGED" for p in prs) else "closed"
+    return Verdict(True, "%s %s, %s done" % (", ".join("#%d" % p["number"] for p in prs), outcome, ", ".join(primary)))

@@ -17,6 +17,8 @@ FAILED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILU
 PR_TOKENS = {"passing": "pr_pass", "pending": "pr_pending", "failing": "pr_fail", None: "pr_open", "MERGED": "pr_merged", "CLOSED": "pr_closed"}
 # The same tokens for the second sidebar row, used when the PRs do not fit on the ticket row.
 PR_LINE_TOKENS = {state: name.replace("pr_", "prl_") for state, name in PR_TOKENS.items()}
+# Tokens of every sidebar row the tickets and PRs can wrap onto, first row first.
+PR_ROW_TOKENS = [PR_TOKENS, PR_LINE_TOKENS] + [{state: name.replace("pr_", "pr%d_" % row) for state, name in PR_TOKENS.items()} for row in (3, 4)]
 APPROVED_SYMBOL = "✓"
 
 _tokens = {}
@@ -63,7 +65,7 @@ def branch_pr(cwd):
 
 
 def worked_pr_urls(session_id):
-    """PR URLs printed by `gh pr` commands that create or change a PR in a Claude session."""
+    """PR URLs Claude recorded as `pr-link` entries plus those printed by `gh pr` commands that create or change a PR."""
     if not re.fullmatch(r"[A-Za-z0-9-]+", session_id):
         return []
     paths = glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % session_id))
@@ -73,9 +75,12 @@ def worked_pr_urls(session_id):
     with open(paths[0]) as f:
         for line in f:
             try:
-                content = (json.loads(line).get("message") or {}).get("content")
+                entry = json.loads(line)
             except ValueError:
                 continue
+            if entry.get("type") == "pr-link":
+                urls.append(entry["prUrl"])
+            content = (entry.get("message") or {}).get("content")
             for block in content if isinstance(content, list) else []:
                 if block.get("type") == "tool_use" and PR_WRITE_COMMAND.search(str((block.get("input") or {}).get("command", ""))):
                     create_calls.add(block["id"])
@@ -113,18 +118,20 @@ def session_prs(cwd, session_id):
     return prs
 
 
+def pr_text(pr):
+    text = "#%d" % pr["number"]
+    if pr_state(pr) in ("MERGED", "CLOSED"):
+        return strike(text)
+    return text + APPROVED_SYMBOL if pr.get("reviewDecision") == "APPROVED" else text
+
+
 def tokens(prs, icon, names=PR_TOKENS):
     """Sidebar tokens named by `names`, one per PR state so each can be colored. Merged and closed PRs are struck through,
     open PRs get a check once approved. The icon goes inside the first token so a single PR has no separator."""
     out = {name: None for name in names.values()}
     for pr in prs:
-        state = pr_state(pr)
-        text = "#%d" % pr["number"]
-        if state in ("MERGED", "CLOSED"):
-            text = strike(text)
-        elif pr.get("reviewDecision") == "APPROVED":
-            text += APPROVED_SYMBOL
-        name = names[state]
+        name = names[pr_state(pr)]
+        text = pr_text(pr)
         out[name] = "%s %s" % (out[name], text) if out[name] else text
     first = next((name for name in names.values() if out[name]), None)
     if first:

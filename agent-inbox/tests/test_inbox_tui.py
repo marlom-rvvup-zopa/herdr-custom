@@ -82,10 +82,25 @@ class SnoozeTest(unittest.TestCase):
         self.assertEqual([name for name, _ in lib.SNOOZE_CHOICES], ["4 hours", "1 day", "3 days", "7 days"])
 
 
+class MarkTest(unittest.TestCase):
+    def test_workflow_agent_gets_the_calendar_icon(self):
+        self.assertEqual(inbox_tui.mark({"tokens": {"workflow": "\uf073 triage (1h ago)"}}, woken=False), inbox_tui.WORKFLOW_ICON)
+
+    def test_agent_back_from_a_snooze_gets_the_snooze_icon(self):
+        self.assertEqual(inbox_tui.mark({"tokens": {}}, woken=True), inbox_tui.SNOOZE_ICON)
+
+    def test_other_agents_get_a_blank(self):
+        self.assertEqual(inbox_tui.mark({"tokens": {}}, woken=False), " ")
+
+
 class SettledByTest(unittest.TestCase):
     def test_automatic_settle_shows_its_reason(self):
         entry = {"settled_by": "auto", "settle_reason": "#9 merged, PAY-1 done"}
         self.assertEqual(inbox_tui.settled_by_cells(entry), ["auto", "#9 merged, PAY-1 done"])
+
+    def test_settle_after_a_snooze_shows_its_reason(self):
+        entry = {"settled_by": "snooze", "settle_reason": "#9 closed, PAY-1 done"}
+        self.assertEqual(inbox_tui.settled_by_cells(entry), ["snooze", "#9 closed, PAY-1 done"])
 
     def test_manual_and_older_entries_show_you(self):
         self.assertEqual(inbox_tui.settled_by_cells({"title": "T"}), ["you", ""])
