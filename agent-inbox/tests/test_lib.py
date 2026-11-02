@@ -8,6 +8,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import lib
+import worktrees
 
 NOW = 1_000_000.0
 
@@ -81,14 +82,10 @@ class ShelveTest(StateDirTest):
             lib.shelve({**self.AGENT, "agent": "gemini"}, "settled")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ResumeTest(StateDirTest):
     ENTRY = {"agent": "claude", "session": "s1", "cwd": "/p", "workspace_id": "w1", "workspace_label": "ws", "title": "T"}
 
-    def resume(self, focus):
+    def resume(self, focus, entry=None):
         calls = []
 
         def cli(*args):
@@ -100,7 +97,7 @@ class ResumeTest(StateDirTest):
             return {}
 
         with mock.patch.object(lib, "herdr_cli", side_effect=cli):
-            return lib.resume(self.ENTRY, focus), calls
+            return lib.resume(entry or self.ENTRY, focus), calls
 
     def test_session_is_resumed_in_a_new_tab_of_its_workspace(self):
         _, calls = self.resume(focus=False)
@@ -119,6 +116,26 @@ class ResumeTest(StateDirTest):
         _, calls = self.resume(focus=True)
         self.assertIn(("workspace", "focus", "w1"), calls)
 
+    def test_removed_worktree_is_restored_before_the_tab_opens(self):
+        tree = {"path": "/nowhere/feat", "git_dir": "/repo/.git", "branch": "feat", "head": "abc"}
+        with mock.patch.object(worktrees, "restore") as restore:
+            _, calls = self.resume(focus=False, entry={**self.ENTRY, "cwd": "/nowhere/feat/sub", "worktree": tree})
+        restore.assert_called_once_with(tree)
+
+    def test_worktree_that_still_exists_is_left_alone(self):
+        tree = {"path": tempfile.gettempdir(), "git_dir": "/repo/.git", "branch": "feat", "head": "abc"}
+        with mock.patch.object(worktrees, "restore") as restore:
+            self.resume(focus=False, entry={**self.ENTRY, "worktree": tree})
+        restore.assert_not_called()
+
+    def test_failed_restore_opens_no_tab(self):
+        tree = {"path": "/nowhere/feat", "git_dir": "/repo/.git", "branch": "feat", "head": "abc"}
+        calls = []
+        with mock.patch.object(worktrees, "restore", side_effect=RuntimeError("branch is checked out")), mock.patch.object(lib, "herdr_cli", side_effect=lambda *a: calls.append(a) or {}):
+            with self.assertRaisesRegex(RuntimeError, "branch is checked out"):
+                lib.resume({**self.ENTRY, "worktree": tree}, False)
+        self.assertEqual(calls, [])
+
 
 class HerdrCliTest(unittest.TestCase):
     def test_command_with_no_output_returns_an_empty_result(self):
@@ -129,3 +146,84 @@ class HerdrCliTest(unittest.TestCase):
 class AgoTextTest(unittest.TestCase):
     def test_units(self):
         self.assertEqual([lib.ago_text(s) for s in (0, 59, 60, 3599, 3600, 90000, 200000)], ["just now", "just now", "1m ago", "59m ago", "1h ago", "1d ago", "2d ago"])
+
+
+class SettleWorktreeTest(StateDirTest):
+    TREE = {"path": "/trees/feat", "git_dir": "/repo/.git", "branch": "feat", "head": "abc"}
+
+    def setUp(self):
+        super().setUp()
+        self.removed = []
+        self.blocked = None
+        self.panes = [{"pane_id": "w1:p1", "cwd": "/trees/feat", "foreground_cwd": "/trees/feat"}]
+        self.tree = self.TREE
+        self.remove_error = None
+        for name, value in (
+            ("linked_worktree", lambda cwd: self.tree),
+            ("blocker", lambda info, others: self.blocked if self.blocked else (self.others.append(others) or None)),
+            ("remove", self.remove),
+        ):
+            patcher = mock.patch.object(worktrees, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.others = []
+
+    def remove(self, info):
+        if self.remove_error:
+            raise RuntimeError(self.remove_error)
+        self.removed.append(info)
+
+    def request(self, method, params, timeout=10.0):
+        if method == "pane.list":
+            return {"panes": self.panes}
+        return {"workspace": {"label": "ws"}}
+
+    def settle(self):
+        with mock.patch.object(lib, "herdr_request", side_effect=self.request) as request:
+            entry = lib.settle(ShelveTest.AGENT)
+        return entry, request
+
+    def test_settling_removes_the_worktree_the_session_runs_in(self):
+        self.settle()
+        self.assertEqual(self.removed, [self.TREE])
+
+    def test_settled_entry_remembers_the_worktree_for_resume(self):
+        entry, _ = self.settle()
+        self.assertEqual(entry["worktree"], self.TREE)
+
+    def test_the_sessions_own_pane_is_not_another_pane(self):
+        self.settle()
+        self.assertEqual(self.others, [[]])
+
+    def test_other_panes_cwds_are_checked_against_the_worktree(self):
+        self.panes.append({"pane_id": "w1:p2", "cwd": "/a", "foreground_cwd": "/trees/feat/bin"})
+        self.settle()
+        self.assertEqual(self.others, [["/a", "/trees/feat/bin"]])
+
+    def test_blocked_worktree_stops_the_settle_before_anything_changes(self):
+        self.blocked = "it has uncommitted changes"
+        with mock.patch.object(lib, "herdr_request", side_effect=self.request) as request:
+            with self.assertRaisesRegex(lib.CannotShelve, "Cannot remove worktree feat: it has uncommitted changes"):
+                lib.settle(ShelveTest.AGENT)
+        self.assertEqual((self.removed, lib.load_json("settled.json", []), [c for c in request.call_args_list if c.args[0] == "pane.close"]), ([], [], []))
+
+    def test_failed_removal_stops_the_settle_before_the_pane_closes(self):
+        self.remove_error = "locked"
+        with mock.patch.object(lib, "herdr_request", side_effect=self.request) as request:
+            with self.assertRaisesRegex(lib.CannotShelve, "Cannot remove worktree feat: locked"):
+                lib.settle(ShelveTest.AGENT)
+        self.assertEqual((lib.load_json("settled.json", []), [c for c in request.call_args_list if c.args[0] == "pane.close"]), ([], []))
+
+    def test_session_outside_a_worktree_settles_as_before(self):
+        self.tree = None
+        entry, _ = self.settle()
+        self.assertEqual((self.removed, "worktree" in entry), ([], False))
+
+    def test_other_ways_of_shelving_leave_the_worktree_alone(self):
+        with mock.patch.object(lib, "herdr_request", side_effect=self.request):
+            lib.shelve(ShelveTest.AGENT, "settled", settled_by="auto")
+        self.assertEqual(self.removed, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

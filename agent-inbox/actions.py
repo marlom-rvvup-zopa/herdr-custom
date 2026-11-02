@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 import jira_status
-from lib import CannotShelve, family_root, herdr_request, load_json, notify, save_json, shelve, state_dir
+from lib import CannotShelve, family_root, herdr_request, load_json, notify, save_json, settle, state_dir
 
 JIRA_BROWSE_URL = "https://%s/browse/" % jira_status.JIRA_SITE
 TICKET_PATTERN = re.compile(r"[A-Z][A-Z0-9]{1,9}-\d+")
@@ -30,7 +30,7 @@ def settle():
         notify("Settle failed", "No agent in the focused pane.")
         return 1
     try:
-        entry = shelve(agent, "settled")
+        entry = settle(agent)
     except CannotShelve as e:
         notify("Settle failed", str(e))
         return 1

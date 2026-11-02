@@ -10,6 +10,8 @@ import socket
 import subprocess
 import time
 
+import worktrees
+
 MAX_SUB_DEPTH = 5
 RESUME_COMMANDS = {
     "claude": "claude --resume {}",
@@ -138,8 +140,35 @@ def is_stale(rec, last_used, touched, now):
     return now - last_interaction(rec, last_used, touched) > STALE_AFTER_SECS
 
 
-def shelve(agent, store, **extra):
-    """Close an agent's pane and keep its session in a store so it can be resumed later."""
+def settle(agent):
+    """Shelve the session as settled by hand, deleting the git worktree it runs in."""
+    return shelve(agent, "settled", remove_worktree=True)
+
+
+def other_pane_cwds(agent):
+    panes = herdr_request("pane.list", {})["panes"]
+    return [cwd for pane in panes if pane["pane_id"] != agent["pane_id"] for cwd in (pane["cwd"], pane.get("foreground_cwd") or pane["cwd"])]
+
+
+def delete_worktree(agent):
+    """Delete the linked git worktree the agent runs in, unless that could lose work. Returns it, None outside one."""
+    tree = worktrees.linked_worktree(agent["cwd"])
+    if not tree:
+        return None
+    name = os.path.basename(tree["path"])
+    reason = worktrees.blocker(tree, other_pane_cwds(agent))
+    if reason:
+        raise CannotShelve("Cannot remove worktree %s: %s." % (name, reason))
+    try:
+        worktrees.remove(tree)
+    except RuntimeError as e:
+        raise CannotShelve("Cannot remove worktree %s: %s" % (name, e))
+    return tree
+
+
+def shelve(agent, store, remove_worktree=False, **extra):
+    """Close an agent's pane and keep its session in a store so it can be resumed later.
+    With `remove_worktree` the git worktree the session runs in is deleted first and recreated on resume."""
     session = agent.get("agent_session") or {}
     if agent["agent_status"] in ("working", "blocked"):
         raise CannotShelve("Agent is %s. Wait until it is idle." % agent["agent_status"])
@@ -155,6 +184,9 @@ def shelve(agent, store, **extra):
         "shelved_at": time.time(),
         **extra,
     }
+    tree = delete_worktree(agent) if remove_worktree else None
+    if tree:
+        entry["worktree"] = tree
     # A session sits in one store only.
     for name in STORES:
         kept = [e for e in load_json(name + ".json", []) if e["session"] != entry["session"]]
@@ -177,8 +209,10 @@ def herdr_cli(*args):
 
 
 def resume(entry, focus):
-    """Reopen a stored session in its original workspace, or in a new one if that is gone.
+    """Reopen a stored session in its original workspace, or in a new one if that is gone, recreating its worktree first if it was deleted.
     Returns the new terminal id and marks it touched, so a stale transcript does not shelve it again at once."""
+    if entry.get("worktree") and not os.path.isdir(entry["worktree"]["path"]):
+        worktrees.restore(entry["worktree"])
     label = entry.get("workspace_label") or os.path.basename(entry["cwd"])
     workspaces = herdr_cli("workspace", "list")["workspaces"]
     workspace_id = next(
