@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Agent inbox daemon.
 
-Sorts the Agents panel by last use (the moment an agent starts working, i.e.
-a prompt was sent) and reports one state token per agent so the sidebar can
-show working / needs input / done / idle in distinct colors.
+Sorts the Agents panel by state (needs input, idle, done, then working and waiting on sub agents),
+and within a state by last use (the moment an agent starts working, i.e. a prompt was sent).
+Reports one state token per agent so the sidebar can show working / waiting / needs input / done / idle.
 
 Usage: daemon.py            run the daemon (exits if one is already running)
        daemon.py --ensure   start the daemon detached if it is not running
@@ -84,8 +84,12 @@ STATE_LABELS = {
     "blocked": "󱔢 needs input",
     "done": "󰗠 done",
     "idle": "󰝦 idle",
+    "waiting": "󰔟 waiting",
 }
-STATE_TOKENS = {status: "st_" + status for status in STATE_LABELS}
+# Herdr allows 16 tokens per pane and they are all taken, so waiting is drawn through the working token.
+STATE_TOKENS = {**{status: "st_" + status for status in STATE_LABELS}, "waiting": "st_working"}
+# Higher sorts first in the sidebar: needs input, idle, done, then working and waiting.
+URGENCY = {"blocked": 3, "idle": 2, None: 2, "done": 1, "working": 0, "waiting": 0}
 
 
 def log(msg):
@@ -172,11 +176,25 @@ def summarize(prompts):
     return summary[:HINT_CHARS]
 
 
+def shown_statuses(live, state, parents):
+    """The status each terminal shows. An agent that is not working or asking for input, but has a working
+    sub agent somewhere below it, is waiting for that sub agent."""
+    shown = {tid: display_status(rec["agent_status"], state[tid]["unseen_done"]) for tid, rec in live.items()}
+    for tid, rec in live.items():
+        if rec["agent_status"] != "working":
+            continue
+        for ancestor in lineage(tid, parents)[1:]:
+            if shown[ancestor] in ("idle", "done", None):
+                shown[ancestor] = "waiting"
+    return shown
+
+
 def layouts(agents, state, parents, collapsed, woken):
-    """Per terminal: sub agent depth, sort key and visibility. A family sorts by its most recent member,
-    and a family with an agent back from a snooze sorts before every other one."""
+    """Per terminal: status shown, sub agent depth, sort key and visibility. A family sorts by the main agent's status
+    unless a sub agent needs input, then by its most recent member, and a family with an agent back from a snooze sorts before every other one."""
     live = {a["terminal_id"]: a for a in agents}
     parents = {child: parent for child, parent in parents.items() if child in live and parent in live}
+    shown = shown_statuses(live, state, parents)
     families = {}
     for tid in live:
         families.setdefault(family_root(tid, parents)[0], []).append(tid)
@@ -184,6 +202,7 @@ def layouts(agents, state, parents, collapsed, woken):
     for root, members in families.items():
         family_time = max(state[tid]["last_used"] for tid in members)
         back = any(tid in woken for tid in members)
+        urgency = URGENCY["blocked"] if "blocked" in (shown[tid] for tid in members) else URGENCY[shown[root]]
         for tid in members:
             depth = family_root(tid, parents)[1]
             # The key spells out the path from the root, one recency segment per sub agent, closed by "9".
@@ -191,9 +210,10 @@ def layouts(agents, state, parents, collapsed, woken):
             path = lineage(tid, parents)[-2::-1]
             tail = "".join("5%012d%s" % (state[node]["last_used"], node[-6:].rjust(6)) for node in path) + "9"
             out[tid] = {
+                "status": shown[tid],
                 "depth": depth,
                 "woken": tid in woken,
-                "sort_key": "%d%012d-%s-%s" % (1 + back, family_time, root[-6:], tail),
+                "sort_key": "%d%d%012d-%s-%s" % (1 + back, urgency, family_time, root[-6:], tail),
                 # A sub agent that needs input stays visible even when its family is collapsed.
                 "hidden": depth > 0 and root in collapsed and live[tid]["agent_status"] != "blocked",
                 "hidden_subs": len(members) - 1 if depth == 0 and root in collapsed else 0,
@@ -259,7 +279,7 @@ def native_tokens(subs, layout):
     if not subs or layout["hidden_subs"]:
         return tokens
     # Rows hang one level below the parent, in the column its own children use.
-    pad = BLANK * 2 if not layout["depth"] else layout["guides"] + (BLANK if layout["last_child"] else SUB_GUTTER) + BLANK * 2
+    pad = "" if not layout["depth"] else layout["guides"] + (BLANK if layout["last_child"] else SUB_GUTTER) + BLANK * 2
     shown = subs[:NATIVE_ROWS]
     hidden = len(subs) - len(shown)
     if hidden:
@@ -503,7 +523,7 @@ class Daemon:
         self.reported[key] = params
 
     def report(self, rec, st, now, layout):
-        shown = display_status(rec["agent_status"], st["unseen_done"])
+        shown = layout["status"]
         tokens = {token: None for token in STATE_TOKENS.values()}
         if shown:
             tokens[STATE_TOKENS[shown]] = STATE_LABELS[shown]

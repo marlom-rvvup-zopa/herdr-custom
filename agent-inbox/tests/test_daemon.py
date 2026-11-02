@@ -114,6 +114,14 @@ class ReportTest(DaemonTest):
         line = self.calls[0][1]["tokens"]["ticket_line"]
         self.assertEqual((line.endswith("PAY-1 +2"), "PAY-8" in line), (True, False))
 
+    def test_waiting_parent_is_reported_through_the_working_token(self):
+        parent, child = agent("p", "idle", terminal_title_stripped="T"), agent("c", "working")
+        state = {"p": {"last_used": 1, "status": "idle", "unseen_done": False}, "c": {"last_used": 2, "status": "working", "unseen_done": False}}
+        layout = daemon.layouts([parent, child], state, {"c": "p"}, set(), set())["p"]
+        self.daemon.report(parent, state["p"], NOW, layout)
+        tokens = self.calls[0][1]["tokens"]
+        self.assertEqual((tokens["st_working"], tokens["st_idle"]), (daemon.STATE_LABELS["waiting"], None))
+
 
 class TicketCheckTest(TicketTest):
     def setUp(self):
@@ -359,7 +367,7 @@ class ReplyAgeTest(unittest.TestCase):
 class LayoutsTest(unittest.TestCase):
     def order(self, woken):
         agents = [agent("a"), agent("b")]
-        state = {"a": {"last_used": 200}, "b": {"last_used": 100}}
+        state = {"a": {"last_used": 200, "unseen_done": False}, "b": {"last_used": 100, "unseen_done": False}}
         out = daemon.layouts(agents, state, {}, set(), woken)
         return sorted(out, key=lambda tid: out[tid]["sort_key"], reverse=True)
 
@@ -370,15 +378,79 @@ class LayoutsTest(unittest.TestCase):
         self.assertEqual(self.order({"b"}), ["b", "a"])
 
     def test_woken_flag_is_reported(self):
-        out = daemon.layouts([agent("a")], {"a": {"last_used": 1}}, {}, set(), {"a"})
+        out = daemon.layouts([agent("a")], {"a": {"last_used": 1, "unseen_done": False}}, {}, set(), {"a"})
         self.assertTrue(out["a"]["woken"])
 
     def test_sub_agent_of_a_woken_parent_stays_under_it(self):
         agents = [agent("p"), agent("c"), agent("x")]
-        state = {"p": {"last_used": 1}, "c": {"last_used": 2}, "x": {"last_used": 3}}
+        state = {tid: {"last_used": used, "unseen_done": False} for tid, used in (("p", 1), ("c", 2), ("x", 3))}
         out = daemon.layouts(agents, state, {"c": "p"}, set(), {"p"})
         order = sorted(out, key=lambda tid: out[tid]["sort_key"], reverse=True)
         self.assertEqual(order, ["p", "c", "x"])
+
+
+class NativeTokensTest(unittest.TestCase):
+    def test_native_sub_agent_of_a_main_agent_starts_at_the_row_edge(self):
+        layout = daemon.layouts([agent("p")], {"p": {"last_used": 1, "unseen_done": False}}, {}, set(), set())["p"]
+        tokens = daemon.native_tokens([("general-purpose", "Lazy-load")], layout)
+        self.assertEqual(tokens["native_1"], daemon.LAST_SUB_MARK + "general-purpose · Lazy-load")
+
+
+class UrgencyOrderTest(unittest.TestCase):
+    def layout(self, agents, parents=None, unseen_done=()):
+        state = {rec["terminal_id"]: {"last_used": n, "unseen_done": rec["terminal_id"] in unseen_done} for n, rec in enumerate(agents)}
+        return daemon.layouts(agents, state, parents or {}, set(), set())
+
+    def order(self, out):
+        return sorted(out, key=lambda tid: out[tid]["sort_key"], reverse=True)
+
+    def test_needs_input_then_idle_then_done_then_working_whatever_the_recency(self):
+        agents = [agent("working", "working"), agent("idle", "idle"), agent("done", "done"), agent("blocked", "blocked")]
+        self.assertEqual(self.order(self.layout(agents)), ["blocked", "idle", "done", "working"])
+
+    def test_recency_orders_agents_in_the_same_state(self):
+        agents = [agent("old", "idle"), agent("new", "idle")]
+        self.assertEqual(self.order(self.layout(agents)), ["new", "old"])
+
+    def test_idle_agent_with_a_working_sub_agent_is_waiting(self):
+        out = self.layout([agent("p", "idle"), agent("c", "working")], {"c": "p"})
+        self.assertEqual((out["p"]["status"], out["c"]["status"]), ("waiting", "working"))
+
+    def test_done_agent_with_a_working_sub_agent_is_waiting(self):
+        out = self.layout([agent("p", "done"), agent("c", "working")], {"c": "p"})
+        self.assertEqual(out["p"]["status"], "waiting")
+
+    def test_unseen_result_with_a_working_sub_agent_is_waiting(self):
+        out = self.layout([agent("p", "idle"), agent("c", "working")], {"c": "p"}, unseen_done={"p"})
+        self.assertEqual(out["p"]["status"], "waiting")
+
+    def test_every_ancestor_of_a_working_sub_agent_is_waiting(self):
+        agents = [agent("root", "idle"), agent("mid", "idle"), agent("leaf", "working")]
+        out = self.layout(agents, {"mid": "root", "leaf": "mid"})
+        self.assertEqual((out["root"]["status"], out["mid"]["status"]), ("waiting", "waiting"))
+
+    def test_agent_needing_input_stays_blocked_while_a_sub_agent_works(self):
+        out = self.layout([agent("p", "blocked"), agent("c", "working")], {"c": "p"})
+        self.assertEqual(out["p"]["status"], "blocked")
+
+    def test_idle_sub_agents_leave_the_parent_idle(self):
+        out = self.layout([agent("p", "idle"), agent("c", "idle")], {"c": "p"})
+        self.assertEqual(out["p"]["status"], "idle")
+
+    def test_waiting_family_sorts_with_working_agents_below_idle_ones(self):
+        agents = [agent("p", "idle"), agent("c", "working"), agent("other", "idle")]
+        order = self.order(self.layout(agents, {"c": "p"}))
+        self.assertEqual(order, ["other", "p", "c"])
+
+    def test_working_main_agent_keeps_its_family_with_the_working_agents_even_when_its_sub_agents_are_idle(self):
+        agents = [agent("p", "working"), agent("c", "idle"), agent("other", "done")]
+        order = self.order(self.layout(agents, {"c": "p"}))
+        self.assertEqual(order, ["other", "p", "c"])
+
+    def test_family_with_a_sub_agent_needing_input_sorts_first(self):
+        agents = [agent("p", "idle"), agent("c", "blocked"), agent("other", "idle")]
+        order = self.order(self.layout(agents, {"c": "p"}))
+        self.assertEqual(order, ["p", "c", "other"])
 
 
 class WokenTest(DaemonTest):
