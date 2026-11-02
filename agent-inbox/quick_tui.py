@@ -10,7 +10,7 @@ import os
 import time
 
 import inbox_tui
-from lib import SNOOZE_CHOICES, CannotShelve, herdr_request, settle
+from lib import SNOOZE_CHOICES, CannotShelve, herdr_request, shelve
 
 # Nerd font icons: nf-cod-claude, nf-md-inbox, nf-md-tab_plus, nf-md-view_split_vertical, nf-md-check, nf-md-sleep.
 GROUPS = [
@@ -49,7 +49,7 @@ def new_claude_pane():
 
 
 def settle(agent):
-    settle(agent)
+    shelve(agent, "settled")
 
 
 def snooze(agent, secs):

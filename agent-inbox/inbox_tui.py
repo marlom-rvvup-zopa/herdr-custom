@@ -9,7 +9,7 @@ import locale
 import os
 import time
 
-from lib import SNOOZE_CHOICES, CannotShelve, forget, herdr_request, is_stale, last_interaction, load_json, resume, save_json, settle, shelve
+from lib import SNOOZE_CHOICES, CannotShelve, forget, herdr_request, is_stale, last_interaction, load_json, resume, save_json, shelve
 
 OPEN, STALE, SETTLED, SNOOZED = range(4)
 # Nerd Font Material Design icons: inbox, archive-clock, archive, alarm-snooze.
@@ -283,7 +283,7 @@ def run(screen):
             menu = 0
         elif key == ord("c") and tab == OPEN:
             try:
-                settle(rows[cursor]["rec"])
+                shelve(rows[cursor]["rec"], "settled")
                 message = "Settled."
             except CannotShelve as e:
                 message = str(e)
