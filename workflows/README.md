@@ -110,6 +110,6 @@ description = "workflows picker"
 command = "herdr plugin action invoke open-picker --plugin marlom.workflows"
 ```
 
-`library/` holds my real workflows; they are symlinked into the global workflows directory.
+My real workflows are not part of this plugin: they live in the global workflows directory (`~/.config/herdr/plugins/config/marlom.workflows/workflows/`). `examples/` is symlinked there.
 
 Tests: `python3 -I -m unittest discover -s . -t .`

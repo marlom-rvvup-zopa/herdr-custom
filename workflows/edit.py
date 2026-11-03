@@ -17,7 +17,7 @@ TAB_LABEL = "edit "
 
 
 def real_path(workflow):
-    """Workflows can be symlinks (library/ is linked into the global dir). Edit the file they point to."""
+    """Workflows can be symlinks (examples/ is linked into the global dir). Edit the file they point to."""
     return os.path.realpath(workflow.path)
 
 

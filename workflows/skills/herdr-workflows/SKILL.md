@@ -11,9 +11,8 @@ Read its `README.md` for the SDK table and trigger rules before writing one. Rea
 ## Create
 
 1. Interview the user first: what starts it (hotkey/picker, or a herdr event), what steps run, what counts as failure, which agent kind, where panes open.
-2. Pick the location. Ask when unclear.
-   - Repo-only: `<repo root>/.herdr/workflows/<name>.py`
-   - Every repo: `~/.config/herdr/plugins/config/marlom.workflows/workflows/<name>.py`
+2. Write it to `~/.config/herdr/plugins/config/marlom.workflows/workflows/<name>.py`. Never create workflows inside a repo
+   (`.herdr/workflows/`) or this plugin, and never `git add` or commit a workflow: the user keeps them out of version control.
    - Name matches `[a-z0-9][a-z0-9_-]*`.
 3. Write plain Python: first docstring line is the picker description; optional literals `TITLE = "..."` and `TRIGGERS = [...]` at module level (literals only, they are parsed, never executed).
    `import wf` works without any path setup. Exit nonzero to fail the run.
@@ -28,7 +27,7 @@ Read its `README.md` for the SDK table and trigger rules before writing one. Rea
 - Do not run a workflow that starts agents, closes panes, or has other side effects until the user agrees.
 - Schedules: `TRIGGERS = [{"schedule": "30 9 * * 1-5", "catch_up_until": "13:00"}]` (cron, local time, global workflows only).
   No pane exists then: use `wf.find_workspace("<label>")` and pass `workspace_id=` and `cwd=` to `wf.agent`.
-  Slash commands need `raw=True`. Real workflows live in `library/` of the plugin, symlinked into the global dir.
+  Slash commands need `raw=True`. Real workflows live in the global dir (`~/.config/herdr/plugins/config/marlom.workflows/workflows/`), not in the plugin.
 - Automations: after adding or changing `TRIGGERS`, invoke `herdr plugin action invoke restart-triggers --plugin marlom.workflows`.
   A workflow whose own actions fire its trigger loops; keep `where` narrow and `cooldown` generous.
 - Needs `HERDR_ENV=1` for anything that talks to herdr. Outside herdr, only write and `list`.
