@@ -32,7 +32,7 @@ sys.exit(1 if review.verdict == "REJECT" else 0)
 | --- | --- |
 | `wf.request(method, params)` | Any herdr socket API method. Returns the result object |
 | `wf.agent(kind, prompt, where=, verdict=, target=, close_on_success=, timeout=)` | Start (or prompt `target`) an agent, wait for it, return `AgentResult(response, pane_id, name, verdict)` |
-| `wf.find_workspace(label_part)` | Id of the one open workspace whose label contains the text. Pass it as `workspace_id=` to `agent`/`open_pane`/`terminal` for runs that start without a pane (schedules) |
+| `wf.find_workspace(label_part)` | Id of the first open workspace whose label contains the text (first wins when several match). Pass it as `workspace_id=` to `agent`/`open_pane`/`terminal` for runs that start without a pane (schedules) |
 | `wf.terminal(command, where=)` | Run a shell command in a new pane. Returns the pane id |
 | `wf.open_pane(where)` / `wf.close(pane)` | Raw pane placement: `tab`, `beside`, `below` |
 | `wf.sh(*argv)` | Local command. Raises on nonzero exit unless `check=False` |

@@ -163,11 +163,15 @@ class AgentTest(unittest.TestCase):
         wf.agent("claude", "hi", workspace_id="w4")
         self.assertEqual(self.fake.calls[0][1]["workspace_id"], "w4")
 
-    def test_find_workspace_requires_exactly_one_match(self):
+    def test_find_workspace_fails_without_a_match(self):
         self.fake.replies["workspace.list"] = {"workspaces": [{"workspace_id": "w4", "label": "[3] pos-launchpad"}, {"workspace_id": "w5", "label": "frontend-monorepo"}]}
         self.assertEqual(wf.find_workspace("pos-launchpad"), "w4")
-        with self.assertRaisesRegex(wf.WorkflowError, "found 0"):
+        with self.assertRaisesRegex(wf.WorkflowError, "no workspace"):
             wf.find_workspace("nope")
+
+    def test_find_workspace_uses_the_first_of_several_matches(self):
+        self.fake.replies["workspace.list"] = {"workspaces": [{"workspace_id": "w4", "label": "pos-launchpad"}, {"workspace_id": "w7", "label": "[2] pos-launchpad"}]}
+        self.assertEqual(wf.find_workspace("pos-launchpad"), "w4")
 
     def test_unknown_placement_fails(self):
         with self.assertRaisesRegex(wf.WorkflowError, "where must be"):

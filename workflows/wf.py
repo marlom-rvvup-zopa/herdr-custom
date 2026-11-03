@@ -115,10 +115,10 @@ def notify(title, body=None, sound="none"):
 
 
 def find_workspace(label_part):
-    """Id of the one open workspace whose label contains label_part. For runs that start without a pane (schedules)."""
+    """Id of the first open workspace whose label contains label_part. For runs that start without a pane (schedules)."""
     matches = [w for w in request("workspace.list")["workspaces"] if label_part in w["label"]]
-    if len(matches) != 1:
-        raise WorkflowError("expected one workspace labelled like %r, found %d: open it in herdr first" % (label_part, len(matches)))
+    if not matches:
+        raise WorkflowError("no workspace labelled like %r: open it in herdr first" % label_part)
     return matches[0]["workspace_id"]
 
 
