@@ -43,6 +43,8 @@ BLANK = "\u2800"
 SUB_MARK = "├─ "
 LAST_SUB_MARK = "└─ "
 SUB_GUTTER = "│"
+# Cells the gutter line is drawn left of the tree mark above it, with the text below it staying in place.
+GUTTER_SHIFT = 2
 # Native sub agents are listed on their parent's row, in tokens of their own: one report holds at most 16 tokens.
 NATIVE_SOURCE = "marlom.agent-inbox.native"
 # Sources hold 16 tokens each: the main one has the first ticket and PR row, the native one the second, this one the rest.
@@ -253,7 +255,7 @@ def continuation_pad(layout):
     """What a sub agent's rows below the first start with: its branch continues with a gutter line, except under the closing child."""
     mark = LAST_SUB_MARK if layout["last_child"] else SUB_MARK
     gutter = BLANK if layout["last_child"] else SUB_GUTTER
-    return layout["guides"] + gutter + BLANK * (len(mark) - 1)
+    return layout["guides"][GUTTER_SHIFT:] + gutter + BLANK * (len(mark) - 1 + GUTTER_SHIFT)
 
 
 def display_width(text):

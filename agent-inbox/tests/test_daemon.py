@@ -520,6 +520,21 @@ class LayoutsTest(unittest.TestCase):
         self.assertEqual(order, ["p", "c", "x"])
 
 
+class ContinuationPadTest(unittest.TestCase):
+    def layouts(self):
+        agents = [agent("p"), agent("a"), agent("b")]
+        state = {tid: {"last_used": used, "unseen_done": False} for tid, used in (("p", 1), ("a", 2), ("b", 3))}
+        return daemon.layouts(agents, state, {"a": "p", "b": "p"}, set(), set())
+
+    def test_gutter_line_sits_left_of_the_title_text_under_an_open_branch(self):
+        open_branch = next(lay for lay in self.layouts().values() if lay["depth"] and not lay["last_child"])
+        self.assertEqual(daemon.continuation_pad(open_branch), daemon.SUB_GUTTER + daemon.BLANK * 4)
+
+    def test_moving_the_gutter_line_keeps_the_text_column(self):
+        open_branch = next(lay for lay in self.layouts().values() if lay["depth"] and not lay["last_child"])
+        self.assertEqual(len(daemon.continuation_pad(open_branch)), len(open_branch["guides"]) + len(daemon.SUB_MARK))
+
+
 class NativeTokensTest(unittest.TestCase):
     def test_native_sub_agent_of_a_main_agent_starts_at_the_row_edge(self):
         layout = daemon.layouts([agent("p")], {"p": {"last_used": 1, "unseen_done": False}}, {}, set(), set())["p"]
