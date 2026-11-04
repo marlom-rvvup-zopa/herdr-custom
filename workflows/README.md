@@ -110,6 +110,17 @@ description = "workflows picker"
 command = "herdr plugin action invoke open-picker --plugin marlom.workflows"
 ```
 
+Sidebar row for the `$workflow` token, under `[ui.sidebar.agents]` `rows` (run `herdr server reload-config` after editing):
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  [
+    { token = "$workflow", fg = "#d19a66", bold = true },
+  ],
+]
+```
+
 My real workflows are not part of this plugin: they live in the global workflows directory (`~/.config/herdr/plugins/config/marlom.workflows/workflows/`). `examples/` is symlinked there.
 
 Tests: `python3 -I -m unittest discover -s . -t .`
