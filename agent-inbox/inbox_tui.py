@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Inbox popup: open, stale, settled and snoozed agents in tabs.
 
-tab/shift-tab switch tabs · j/k move · enter focus or resume · s snooze · c settle · d forget · q close.
+tab/shift-tab switch tabs · / filter by title, ticket or PR · j/k move · enter focus or resume · s snooze · c settle · d forget · q close.
 """
 
 import curses
@@ -15,10 +15,10 @@ OPEN, STALE, SETTLED, SNOOZED = range(4)
 # Nerd Font Material Design icons: inbox, archive-clock, archive, alarm-snooze.
 TABS = [(OPEN, chr(0xf0687), "Open"), (STALE, chr(0xf174f), "Stale"), (SETTLED, chr(0xf003c), "Settled"), (SNOOZED, chr(0xf068e), "Snoozed")]
 HINTS = {
-    OPEN: "enter focus · s snooze · c settle · tab next · q close",
-    STALE: "enter resume · s snooze · d forget · tab next · q close",
-    SETTLED: "enter resume · s snooze · d forget · tab next · q close",
-    SNOOZED: "enter wake now · s change time · d forget · tab next · q close",
+    OPEN: "enter focus · s snooze · c settle · / filter · tab next · q close",
+    STALE: "enter resume · s snooze · d forget · / filter · tab next · q close",
+    SETTLED: "enter resume · s snooze · d forget · / filter · tab next · q close",
+    SNOOZED: "enter wake now · s change time · d forget · / filter · tab next · q close",
 }
 # Marks in the column after the status: nf-fa-calendar for a workflow run, nf-md-alarm_snooze for an agent back from a snooze.
 WORKFLOW_ICON = chr(0xf073)
@@ -52,6 +52,29 @@ def mark(rec, woken):
     return SNOOZE_ICON if woken else " "
 
 
+def search_text(title, workspace, tickets, pr_urls, extra=()):
+    """Lowercase text a filter looks through: title, workspace, ticket keys, `#number` per pull request and anything extra."""
+    numbers = ["#" + url.rstrip("/").rsplit("/", 1)[-1] for url in pr_urls]
+    return " ".join([title, workspace, *tickets, *numbers, *extra]).lower()
+
+
+def matches(text, query):
+    return all(word in text for word in query.lower().split())
+
+
+def filter_key(key, query):
+    """One key while typing a filter: (new query, still typing)."""
+    if key in (10, 13):
+        return query, False
+    if key == 27:
+        return "", False
+    if key in (curses.KEY_BACKSPACE, 127, 8):
+        return query[:-1], True
+    if 32 <= key < 127:
+        return query + chr(key), True
+    return query, True
+
+
 def table(headers, rows, width):
     """Header, separator and rows as aligned lines, with the widest column (the title) taking the slack.
     Returns the lines and each column's start offset."""
@@ -73,6 +96,9 @@ def table(headers, rows, width):
 class Inbox:
     def __init__(self):
         self.now = time.time()
+        self.query = ""
+        self.all_tabs = {kind: [] for kind, _, _ in TABS}
+        self.tabs = self.all_tabs
 
     def load(self):
         self.now = time.time()
@@ -93,17 +119,24 @@ class Inbox:
             while parent in links and depth < 5:
                 parent, depth = links[parent], depth + 1
             title = ("   " * (depth - 1) + "└─ " if depth else "") + (rec.get("terminal_title_stripped") or rec["agent"])
-            ticket = ", ".join(tickets.get(rec["pane_id"], {}).get("tickets", [])[:2])
+            links = tickets.get(rec["pane_id"], {})
+            ticket = ", ".join(links.get("tickets", [])[:2])
+            workspace = workspaces.get(rec["workspace_id"], "")
             open_rows.append({
-                "key": rec["pane_id"], "rec": rec, "token": token, "stale": is_stale(rec, state.get(rec["terminal_id"], {}).get("last_used", self.now), touched, self.now),
-                "cells": [rec["tokens"].get(token, "") if token else "", mark(rec, rec["terminal_id"] in woken), age(idle), title, workspaces.get(rec["workspace_id"], ""), ticket],
+                "key": rec["pane_id"], "rec": rec,
+                "search": search_text(title, workspace, links.get("tickets", []), links.get("pr_urls", [])), "token": token, "stale": is_stale(rec, state.get(rec["terminal_id"], {}).get("last_used", self.now), touched, self.now),
+                "cells": [rec["tokens"].get(token, "") if token else "", mark(rec, rec["terminal_id"] in woken), age(idle), title, workspace, ticket],
             })
-        self.tabs = {
+        self.all_tabs = {
             OPEN: open_rows,
             STALE: self.stored("stale", workspaces, "stale_at"),
             SETTLED: self.stored("settled", workspaces, "shelved_at"),
             SNOOZED: self.stored("snoozed", workspaces, "wake_at"),
         }
+        self.filter()
+
+    def filter(self):
+        self.tabs = {kind: [r for r in rows if matches(r["search"], self.query)] for kind, rows in self.all_tabs.items()}
 
     def stored(self, store, workspaces, when):
         rows = []
@@ -114,7 +147,8 @@ class Inbox:
             where = [entry["title"], entry.get("workspace_label") or "", os.path.basename(entry["cwd"])]
             # The settled tab says who settled each session, so wrong automatic settles are easy to spot.
             cells = [shown, *settled_by_cells(entry), *where] if store == "settled" else [shown, *where]
-            rows.append({"key": entry["session"], "entry": entry, "cells": cells})
+            search = search_text(entry["title"], entry.get("workspace_label") or "", entry.get("tickets", []), entry.get("pr_urls", []), [where[2], entry.get("settle_reason") or ""])
+            rows.append({"key": entry["session"], "entry": entry, "search": search, "cells": cells})
         if when == "wake_at":
             rows.sort(key=lambda r: r["entry"]["wake_at"])
         return rows
@@ -135,7 +169,7 @@ HEADERS = {
 }
 
 
-def draw(screen, inbox, tab, cursor, message, menu=None):
+def draw(screen, inbox, tab, cursor, message, menu=None, typing=False):
     screen.erase()
     height, width = screen.getmaxyx()
     if menu is not None:
@@ -152,7 +186,7 @@ def draw(screen, inbox, tab, cursor, message, menu=None):
         x += len(label) + 1
     rows = inbox.tabs[tab]
     if not rows:
-        screen.addnstr(2, 1, "Nothing here.", width - 2, curses.A_DIM)
+        screen.addnstr(2, 1, "No match." if inbox.query else "Nothing here.", width - 2, curses.A_DIM)
     else:
         lines, offsets = table(HEADERS[tab], [r["cells"] for r in rows], width - 2)
         screen.addnstr(2, 1, lines[0], width - 2, curses.A_BOLD)
@@ -170,8 +204,16 @@ def draw(screen, inbox, tab, cursor, message, menu=None):
                     screen.chgat(y, 1 + offsets[1], 1, curses.color_pair(1) | curses.A_BOLD)
                 if row["stale"]:
                     screen.chgat(y, 1 + offsets[2], len(row["cells"][2]), curses.A_DIM)
-    screen.addnstr(height - 1, 1, message or HINTS[tab], width - 2, curses.A_DIM if not message else curses.A_BOLD)
+    screen.addnstr(height - 1, 1, footer(inbox.query, typing, message, tab), width - 2, curses.A_BOLD if message or typing else curses.A_DIM)
     screen.refresh()
+
+
+def footer(query, typing, message, tab):
+    if typing:
+        return "/" + query + "▏"
+    if message:
+        return message
+    return HINTS[tab] + (" · filter: " + query if query else "")
 
 
 MENU_WIDTH = 26
@@ -233,15 +275,21 @@ def run(screen):
     screen.timeout(2000)
     inbox = Inbox()
     inbox.load()
-    tab, cursor, message, menu = OPEN, 0, "", None
+    tab, cursor, message, menu, typing = OPEN, 0, "", None, False
     while True:
         rows = inbox.tabs[tab]
         cursor = min(cursor, max(len(rows) - 1, 0))
-        draw(screen, inbox, tab, cursor, message, menu)
+        draw(screen, inbox, tab, cursor, message, menu, typing)
         key = screen.getch()
         message = ""
         if key == -1:
             inbox.load()
+        elif typing:
+            inbox.query, typing = filter_key(key, inbox.query)
+            inbox.filter()
+            cursor = 0
+        elif key == ord("/"):
+            typing = True
         elif menu is not None:
             menu, secs, closed = menu_key(key, menu)
             if closed:
@@ -253,6 +301,10 @@ def run(screen):
                 except CannotShelve as e:
                     message = str(e)
                 inbox.load()
+        elif key == 27 and inbox.query:
+            inbox.query = ""
+            inbox.filter()
+            cursor = 0
         elif key in (ord("q"), 27):
             return
         elif key in (9, curses.KEY_RIGHT, ord("l")):

@@ -67,6 +67,15 @@ class ShelveTest(StateDirTest):
         request.assert_called_with("pane.close", {"pane_id": "w1:p1"})
         self.assertEqual(entry["title"], "Title")
 
+    def test_shelved_session_keeps_its_tickets_and_pull_requests(self):
+        lib.save_json("links.json", {"w1:p1": {"tickets": ["PAY-1"], "pr_urls": ["https://github.com/o/r/pull/12"]}})
+        entry, _ = self.shelve("settled")
+        self.assertEqual((entry["tickets"], entry["pr_urls"]), (["PAY-1"], ["https://github.com/o/r/pull/12"]))
+
+    def test_session_without_links_is_shelved_with_none(self):
+        entry, _ = self.shelve("settled")
+        self.assertEqual((entry["tickets"], entry["pr_urls"]), ([], []))
+
     def test_session_moves_between_stores(self):
         self.shelve("settled")
         self.shelve("snoozed", wake_at=5)

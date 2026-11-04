@@ -145,6 +145,7 @@ def shelve(agent, store, **extra):
         raise CannotShelve("Agent is %s. Wait until it is idle." % agent["agent_status"])
     if agent["agent"] not in RESUME_COMMANDS or session.get("kind") != "id":
         raise CannotShelve("Cannot resume %s sessions, so closing would lose it." % agent["agent"])
+    links = load_json("links.json", {}).get(agent["pane_id"], {})
     entry = {
         "agent": agent["agent"],
         "session": session["value"],
@@ -152,6 +153,8 @@ def shelve(agent, store, **extra):
         "workspace_id": agent["workspace_id"],
         "workspace_label": herdr_request("workspace.get", {"workspace_id": agent["workspace_id"]})["workspace"]["label"],
         "title": agent.get("terminal_title_stripped") or agent["agent"],
+        "tickets": links.get("tickets", []),
+        "pr_urls": links.get("pr_urls", []),
         "shelved_at": time.time(),
         **extra,
     }

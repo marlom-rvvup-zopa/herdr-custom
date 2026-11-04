@@ -115,6 +115,119 @@ class SettledByTest(unittest.TestCase):
         self.assertEqual(len(row["cells"]), len(inbox_tui.HEADERS[inbox_tui.SETTLED]))
 
 
+class SearchTextTest(unittest.TestCase):
+    def test_includes_ticket_keys_and_pull_request_numbers(self):
+        text = inbox_tui.search_text("Fix login", "ws", ["PAY-1"], ["https://github.com/o/r/pull/12"])
+        self.assertIn("pay-1", text)
+        self.assertIn("#12", text)
+
+    def test_is_lowercase(self):
+        self.assertIn("fix login", inbox_tui.search_text("Fix Login", "", [], []))
+
+
+class MatchesTest(unittest.TestCase):
+    TEXT = inbox_tui.search_text("Fix login", "payments", ["PAY-1"], ["https://github.com/o/r/pull/12"])
+
+    def test_empty_query_matches_everything(self):
+        self.assertTrue(inbox_tui.matches(self.TEXT, ""))
+
+    def test_matches_a_ticket_ignoring_case(self):
+        self.assertTrue(inbox_tui.matches(self.TEXT, "pay-1"))
+
+    def test_matches_a_pull_request_number_with_or_without_hash(self):
+        self.assertTrue(inbox_tui.matches(self.TEXT, "#12"))
+        self.assertTrue(inbox_tui.matches(self.TEXT, "12"))
+
+    def test_matches_part_of_the_title(self):
+        self.assertTrue(inbox_tui.matches(self.TEXT, "login"))
+
+    def test_every_word_must_match(self):
+        self.assertFalse(inbox_tui.matches(self.TEXT, "login #99"))
+
+    def test_words_match_in_any_order(self):
+        self.assertTrue(inbox_tui.matches(self.TEXT, "#12 login"))
+
+
+class FilterTest(unittest.TestCase):
+    def inbox(self):
+        inbox = inbox_tui.Inbox.__new__(inbox_tui.Inbox)
+        inbox.now = NOW
+        inbox.query = ""
+        inbox.all_tabs = {
+            inbox_tui.OPEN: [{"search": "alpha pay-1"}, {"search": "beta #7"}],
+            inbox_tui.STALE: [{"search": "gamma pay-1"}],
+            inbox_tui.SETTLED: [],
+            inbox_tui.SNOOZED: [{"search": "delta #7"}],
+        }
+        inbox.filter()
+        return inbox
+
+    def test_without_a_query_every_row_shows(self):
+        self.assertEqual([len(rows) for rows in self.inbox().tabs.values()], [2, 1, 0, 1])
+
+    def test_query_filters_every_tab(self):
+        inbox = self.inbox()
+        inbox.query = "#7"
+        inbox.filter()
+        self.assertEqual([len(rows) for rows in inbox.tabs.values()], [1, 0, 0, 1])
+
+    def test_clearing_the_query_brings_rows_back(self):
+        inbox = self.inbox()
+        inbox.query = "#7"
+        inbox.filter()
+        inbox.query = ""
+        inbox.filter()
+        self.assertEqual([len(rows) for rows in inbox.tabs.values()], [2, 1, 0, 1])
+
+
+class FilterKeyTest(unittest.TestCase):
+    def test_letters_extend_the_query(self):
+        self.assertEqual(inbox_tui.filter_key(ord("p"), "pa"), ("pap", True))
+
+    def test_backspace_trims_the_query(self):
+        self.assertEqual(inbox_tui.filter_key(127, "pay"), ("pa", True))
+
+    def test_enter_keeps_the_query_and_stops_typing(self):
+        self.assertEqual(inbox_tui.filter_key(10, "pay"), ("pay", False))
+
+    def test_escape_clears_the_query_and_stops_typing(self):
+        self.assertEqual(inbox_tui.filter_key(27, "pay"), ("", False))
+
+    def test_other_keys_change_nothing(self):
+        self.assertEqual(inbox_tui.filter_key(9, "pay"), ("pay", True))
+
+
+class FooterTest(unittest.TestCase):
+    def test_typing_shows_the_query(self):
+        self.assertTrue(inbox_tui.footer("pay", True, "", inbox_tui.OPEN).startswith("/pay"))
+
+    def test_active_filter_is_shown_next_to_the_hints(self):
+        self.assertTrue(inbox_tui.footer("pay", False, "", inbox_tui.OPEN).endswith("filter: pay"))
+
+    def test_message_wins_over_hints(self):
+        self.assertEqual(inbox_tui.footer("", False, "Settled.", inbox_tui.OPEN), "Settled.")
+
+
+class StoredSearchTest(unittest.TestCase):
+    def test_stored_rows_can_be_found_by_ticket_and_pull_request(self):
+        entry = {"session": "s1", "title": "T", "cwd": "/p/x", "shelved_at": NOW, "tickets": ["PAY-1"], "pr_urls": ["https://github.com/o/r/pull/12"]}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HERDR_SOCKET_PATH": os.path.join(tmp, "herdr.sock")}):
+            lib.save_json("stale.json", [entry])
+            inbox = inbox_tui.Inbox.__new__(inbox_tui.Inbox)
+            inbox.now = NOW
+            [row] = inbox.stored("stale", {}, "stale_at")
+        self.assertTrue(inbox_tui.matches(row["search"], "pay-1 #12"))
+
+    def test_settle_reason_of_older_entries_is_searchable(self):
+        entry = {"session": "s1", "title": "T", "cwd": "/p/x", "shelved_at": NOW, "settle_reason": "#9 merged, PAY-1 done"}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HERDR_SOCKET_PATH": os.path.join(tmp, "herdr.sock")}):
+            lib.save_json("settled.json", [entry])
+            inbox = inbox_tui.Inbox.__new__(inbox_tui.Inbox)
+            inbox.now = NOW
+            [row] = inbox.stored("settled", {}, "shelved_at")
+        self.assertTrue(inbox_tui.matches(row["search"], "#9"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
