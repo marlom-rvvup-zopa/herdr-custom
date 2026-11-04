@@ -138,13 +138,19 @@ class ReportTest(DaemonTest):
         rows = [{"key": key, "role": "primary", "sources": []} for key in ("PAY-1", "PAY-8")]
         self.assertTrue(self.sidebar_ticket_line(rows, ["PAY-1", "PAY-8"]).endswith(" +2"))
 
-    def test_waiting_parent_is_reported_through_the_working_token(self):
+    def report_waiting_parent(self):
         parent, child = agent("p", "idle", terminal_title_stripped="T"), agent("c", "working")
         state = {"p": {"last_used": 1, "status": "idle", "unseen_done": False}, "c": {"last_used": 2, "status": "working", "unseen_done": False}}
         layout = daemon.layouts([parent, child], state, {"c": "p"}, set(), set())["p"]
         self.daemon.report(parent, state["p"], NOW, layout)
-        tokens = self.calls[0][1]["tokens"]
-        self.assertEqual((tokens["st_working"], tokens["st_idle"]), (daemon.STATE_LABELS["waiting"], None))
+        return self.calls[0][1]["tokens"]
+
+    def test_waiting_parent_leaves_the_working_token_empty(self):
+        tokens = self.report_waiting_parent()
+        self.assertEqual((tokens["st_working"], tokens["st_idle"]), (None, None))
+
+    def test_waiting_label_does_not_take_a_17th_token_in_the_main_source(self):
+        self.assertNotIn("st_waiting", self.report_waiting_parent())
 
 
 class TicketCheckTest(TicketTest):
@@ -224,6 +230,22 @@ class ShellMarkTest(DaemonTest):
 
     def test_agent_without_a_shell_shows_nothing(self):
         self.assertIsNone(self.mark({1}))
+
+    def extra_tokens(self, shell_waiting):
+        layout = daemon.layouts([self.rec], {"a": {"last_used": 1, "unseen_done": False}}, {}, set(), set(), shell_waiting)["a"]
+        self.daemon.report(self.rec, {"last_used": 1, "status": "idle", "unseen_done": False}, NOW, layout)
+        with mock.patch.object(daemon.native_subs, "running", return_value=[]), mock.patch.object(self.daemon, "session_prs", return_value=[]):
+            self.daemon.report_extra(self.rec, layout)
+        return next(p["tokens"] for m, p in self.calls if p.get("source") == daemon.NATIVE_SOURCE)
+
+    def test_waiting_agent_shows_the_waiting_label_in_its_own_token(self):
+        self.assertEqual(self.extra_tokens({"a"})["st_waiting"], daemon.STATE_LABELS["waiting"])
+
+    def test_agent_that_is_not_waiting_shows_no_waiting_label(self):
+        self.assertIsNone(self.extra_tokens(set())["st_waiting"])
+
+    def test_waiting_label_starts_with_the_chosen_icon(self):
+        self.assertEqual(daemon.STATE_LABELS["waiting"], chr(0xf06ad) + " waiting")
 
     def test_other_agents_than_claude_are_not_looked_up(self):
         self.rec["agent"] = "codex"
@@ -499,9 +521,9 @@ class NativeTokensTest(unittest.TestCase):
 
 
 class UrgencyOrderTest(unittest.TestCase):
-    def layout(self, agents, parents=None, unseen_done=()):
+    def layout(self, agents, parents=None, unseen_done=(), shell_waiting=()):
         state = {rec["terminal_id"]: {"last_used": n, "unseen_done": rec["terminal_id"] in unseen_done} for n, rec in enumerate(agents)}
-        return daemon.layouts(agents, state, parents or {}, set(), set())
+        return daemon.layouts(agents, state, parents or {}, set(), set(), set(shell_waiting))
 
     def order(self, out):
         return sorted(out, key=lambda tid: out[tid]["sort_key"], reverse=True)
@@ -509,6 +531,10 @@ class UrgencyOrderTest(unittest.TestCase):
     def test_needs_input_then_idle_then_done_then_working_whatever_the_recency(self):
         agents = [agent("working", "working"), agent("idle", "idle"), agent("done", "done"), agent("blocked", "blocked")]
         self.assertEqual(self.order(self.layout(agents)), ["blocked", "idle", "done", "working"])
+
+    def test_waiting_agent_sorts_right_after_working_ones(self):
+        agents = [agent("waiting", "idle"), agent("working", "working"), agent("idle", "idle"), agent("done", "done"), agent("blocked", "blocked")]
+        self.assertEqual(self.order(self.layout(agents, shell_waiting={"waiting"})), ["blocked", "idle", "done", "working", "waiting"])
 
     def test_recency_orders_agents_in_the_same_state(self):
         agents = [agent("old", "idle"), agent("new", "idle")]
@@ -538,6 +564,24 @@ class UrgencyOrderTest(unittest.TestCase):
     def test_idle_sub_agents_leave_the_parent_idle(self):
         out = self.layout([agent("p", "idle"), agent("c", "idle")], {"c": "p"})
         self.assertEqual(out["p"]["status"], "idle")
+
+    def test_idle_agent_waiting_on_a_script_is_waiting(self):
+        self.assertEqual(self.layout([agent("a", "idle")], shell_waiting={"a"})["a"]["status"], "waiting")
+
+    def test_done_agent_waiting_on_a_script_is_waiting(self):
+        self.assertEqual(self.layout([agent("a", "done")], shell_waiting={"a"})["a"]["status"], "waiting")
+
+    def test_unseen_result_waiting_on_a_script_is_waiting(self):
+        self.assertEqual(self.layout([agent("a", "idle")], unseen_done={"a"}, shell_waiting={"a"})["a"]["status"], "waiting")
+
+    def test_working_agent_with_a_script_stays_working(self):
+        self.assertEqual(self.layout([agent("a", "working")], shell_waiting={"a"})["a"]["status"], "working")
+
+    def test_agent_needing_input_stays_blocked_with_a_script_running(self):
+        self.assertEqual(self.layout([agent("a", "blocked")], shell_waiting={"a"})["a"]["status"], "blocked")
+
+    def test_idle_agent_without_a_waiting_script_stays_idle(self):
+        self.assertEqual(self.layout([agent("a", "idle")], shell_waiting={"b"})["a"]["status"], "idle")
 
     def test_waiting_family_sorts_with_working_agents_below_idle_ones(self):
         agents = [agent("p", "idle"), agent("c", "working"), agent("other", "idle")]

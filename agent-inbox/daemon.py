@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Agent inbox daemon.
 
-Sorts the Agents panel by state (needs input, idle, done, then working and waiting on sub agents),
+Sorts the Agents panel by state (needs input, idle, done, working, then waiting on a sub agent or a script),
 and within a state by last use (the moment an agent starts working, i.e. a prompt was sent).
 Reports one state token per agent so the sidebar can show working / waiting / needs input / done / idle.
 
@@ -91,12 +91,13 @@ STATE_LABELS = {
     "blocked": "󱔢 needs input",
     "done": "󰗠 done",
     "idle": "󰝦 idle",
-    "waiting": "󰔟 waiting",
+    "waiting": chr(0xf06ad) + " waiting",
 }
-# Herdr allows 16 tokens per pane and they are all taken, so waiting is drawn through the working token.
-STATE_TOKENS = {**{status: "st_" + status for status in STATE_LABELS}, "waiting": "st_working"}
-# Higher sorts first in the sidebar: needs input, idle, done, then working and waiting.
-URGENCY = {"blocked": 3, "idle": 2, None: 2, "done": 1, "working": 0, "waiting": 0}
+STATE_TOKENS = {status: "st_" + status for status in STATE_LABELS}
+# The main source is full, so the waiting label goes out with the native source to get a color of its own.
+WAITING_TOKEN = STATE_TOKENS["waiting"]
+# Higher sorts first in the sidebar: needs input, idle, done, working, then waiting.
+URGENCY = {"blocked": 4, "idle": 3, None: 3, "done": 2, "working": 1, "waiting": 0}
 
 
 def log(msg):
@@ -183,10 +184,13 @@ def summarize(prompts):
     return summary[:HINT_CHARS]
 
 
-def shown_statuses(live, state, parents):
+def shown_statuses(live, state, parents, shell_waiting):
     """The status each terminal shows. An agent that is not working or asking for input, but has a working
-    sub agent somewhere below it, is waiting for that sub agent."""
+    sub agent somewhere below it or a script running that is not a server, is waiting for it."""
     shown = {tid: display_status(rec["agent_status"], state[tid]["unseen_done"]) for tid, rec in live.items()}
+    for tid in shell_waiting & shown.keys():
+        if shown[tid] in ("idle", "done", None):
+            shown[tid] = "waiting"
     for tid, rec in live.items():
         if rec["agent_status"] != "working":
             continue
@@ -196,12 +200,12 @@ def shown_statuses(live, state, parents):
     return shown
 
 
-def layouts(agents, state, parents, collapsed, woken):
+def layouts(agents, state, parents, collapsed, woken, shell_waiting=frozenset()):
     """Per terminal: status shown, sub agent depth, sort key and visibility. A family sorts by the main agent's status
     unless a sub agent needs input, then by its most recent member, and a family with an agent back from a snooze sorts before every other one."""
     live = {a["terminal_id"]: a for a in agents}
     parents = {child: parent for child, parent in parents.items() if child in live and parent in live}
-    shown = shown_statuses(live, state, parents)
+    shown = shown_statuses(live, state, parents, shell_waiting)
     families = {}
     for tid in live:
         families.setdefault(family_root(tid, parents)[0], []).append(tid)
@@ -364,6 +368,8 @@ class Daemon:
         self.pr_queue = queue.Queue()
         self.pr_queued = set()
         self.shell_parents = set()
+        self.claude_pids = {}
+        self.waiting_labels = {}
 
     def assert_view(self):
         herdr_request(
@@ -411,7 +417,10 @@ class Daemon:
         agents = self.archive_stale(agents, links, now)
         woken = self.update_woken(agents, now)
         self.shell_parents = shells.running_parents()
-        layout = layouts(agents, self.state, links, set(load_json("collapsed.json", [])), woken)
+        self.claude_pids = {}
+        waiting_parents = shells.waiting_parents()
+        shell_waiting = {rec["terminal_id"] for rec in agents if rec["agent"] == "claude" and self.claude_pid(rec) in waiting_parents}
+        layout = layouts(agents, self.state, links, set(load_json("collapsed.json", [])), woken, shell_waiting)
         for rec in agents:
             self.report(rec, self.state[rec["terminal_id"]], now, layout[rec["terminal_id"]])
             self.report_extra(rec, layout[rec["terminal_id"]])
@@ -577,6 +586,7 @@ class Daemon:
         tokens = native_tokens(native_subs.running(session["value"]) if is_claude else [], layout)
         tokens["snooze_mark"] = SNOOZE_ICON if layout["woken"] else None
         tokens["shell_mark"] = SHELL_ICON if is_claude and self.has_shell(rec) else None
+        tokens[WAITING_TOKEN] = self.waiting_labels.get(rec["pane_id"])
         tokens.update(self.link_tokens(rec, layout, [1]))
         self.report_source(rec, NATIVE_SOURCE, tokens)
         self.report_source(rec, LINKS_SOURCE, self.link_tokens(rec, layout, [2, 3]))
@@ -591,8 +601,12 @@ class Daemon:
 
     def has_shell(self, rec):
         """True when the agent's claude process has a shell command running, in the foreground or the background."""
-        claude_pid = herdr_request("pane.process_info", {"pane_id": rec["pane_id"]})["process_info"]["foreground_process_group_id"]
-        return claude_pid in self.shell_parents
+        return self.claude_pid(rec) in self.shell_parents
+
+    def claude_pid(self, rec):
+        if rec["pane_id"] not in self.claude_pids:
+            self.claude_pids[rec["pane_id"]] = herdr_request("pane.process_info", {"pane_id": rec["pane_id"]})["process_info"]["foreground_process_group_id"]
+        return self.claude_pids[rec["pane_id"]]
 
     def report(self, rec, st, now, layout):
         shown = layout["status"]
@@ -611,6 +625,7 @@ class Daemon:
         self.links[rec["pane_id"]] = {"tickets": [r["key"] for r in rows], "ticket_roles": rows, "pr_urls": [p["url"] for p in prs]}
         hint = tokens["hint"]
         indent_tokens(tokens, layout, shown)
+        self.waiting_labels[rec["pane_id"]] = tokens.pop(WAITING_TOKEN)
         params = {"pane_id": rec["pane_id"], "source": SOURCE, "tokens": tokens}
         # display_agent replaces the agent label herdr draws on pane borders.
         if hint:

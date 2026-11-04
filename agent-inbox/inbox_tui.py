@@ -23,9 +23,9 @@ HINTS = {
 # Marks in the column after the status: nf-fa-calendar for a workflow run, nf-md-alarm_snooze for an agent back from a snooze.
 WORKFLOW_ICON = chr(0xf073)
 SNOOZE_ICON = chr(0xf068e)
-STATUS_TOKENS = ("st_working", "st_blocked", "st_done", "st_idle")
+STATUS_TOKENS = ("st_working", "st_waiting", "st_blocked", "st_done", "st_idle")
 # curses color pair per status token.
-STATUS_COLORS = {"st_working": 1, "st_blocked": 2, "st_done": 3, "st_idle": 4}
+STATUS_COLORS = {"st_working": 1, "st_blocked": 2, "st_done": 3, "st_idle": 4, "st_waiting": 6}
 # Selected row and tab: dark text on a cyan bar. Reverse video draws default colors the same on both sides in some
 # popups, which hides the text.
 SELECTED_PAIR = 5
@@ -269,7 +269,7 @@ def run(screen):
     curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
-    for pair, color in ((1, curses.COLOR_YELLOW), (2, curses.COLOR_RED), (3, curses.COLOR_CYAN), (4, curses.COLOR_GREEN)):
+    for pair, color in ((1, curses.COLOR_YELLOW), (2, curses.COLOR_RED), (3, curses.COLOR_CYAN), (4, curses.COLOR_GREEN), (6, 8 if curses.COLORS > 8 else curses.COLOR_WHITE)):
         curses.init_pair(pair, color, -1)
     curses.init_pair(SELECTED_PAIR, curses.COLOR_BLACK, curses.COLOR_CYAN)
     screen.timeout(2000)
