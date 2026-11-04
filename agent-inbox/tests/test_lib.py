@@ -1,3 +1,5 @@
+import fcntl
+import json
 import os
 import sys
 import tempfile
@@ -127,6 +129,48 @@ class ResumeTest(StateDirTest):
     def test_foreground_resume_focuses_the_workspace(self):
         _, calls = self.resume(focus=True)
         self.assertIn(("workspace", "focus", "w1"), calls)
+
+
+class HerdrRequestTest(StateDirTest):
+    def reply(self, payload):
+        sock = mock.MagicMock()
+        sock.__enter__.return_value = sock
+        sock.recv.side_effect = [json.dumps(payload).encode() + b"\n"]
+        return mock.patch.object(lib.socket, "socket", return_value=sock)
+
+    def test_missing_pane_raises_pane_not_found(self):
+        with self.reply({"id": "inbox", "error": {"code": "pane_not_found", "message": "pane not found"}}):
+            with self.assertRaises(lib.PaneNotFound):
+                lib.herdr_request("pane.process_info", {})
+
+    def test_other_errors_stay_runtime_errors(self):
+        with self.reply({"id": "inbox", "error": {"code": "boom", "message": "boom"}}):
+            with self.assertRaises(RuntimeError) as caught:
+                lib.herdr_request("agent.list", {})
+        self.assertNotIsInstance(caught.exception, lib.PaneNotFound)
+
+
+class PruneSubLinksTest(StateDirTest):
+    def setUp(self):
+        super().setUp()
+        lib.save_json("subagents.json", {"c": "p"})
+
+    def test_link_of_a_live_terminal_stays(self):
+        lib.prune_sub_links(lambda: {"c", "p"})
+        self.assertEqual(lib.load_json("subagents.json", None), {"c": "p"})
+
+    def test_link_of_a_gone_terminal_is_forgotten(self):
+        lib.prune_sub_links(lambda: {"p"})
+        self.assertEqual(lib.load_json("subagents.json", None), {})
+
+    def test_live_terminals_are_read_while_the_links_are_locked(self):
+        def read_live():
+            with open(os.path.join(lib.state_dir(), "subagents.lock"), "w") as other:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return {"c"}
+
+        lib.prune_sub_links(read_live)
 
 
 class HerdrCliTest(unittest.TestCase):

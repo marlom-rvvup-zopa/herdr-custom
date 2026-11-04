@@ -32,7 +32,7 @@ import shells
 import auto_settle
 import tab_titles
 import tickets as session_tickets
-from lib import CannotShelve, ago_text, family_root, herdr_request, is_stale, last_interaction, lineage, load_json, notify, prune_sub_links, resume, save_json, shelve, socket_path, state_dir
+from lib import CannotShelve, PaneNotFound, ago_text, family_root, herdr_request, is_stale, last_interaction, lineage, load_json, notify, prune_sub_links, resume, save_json, shelve, socket_path, state_dir
 
 SOURCE = "marlom.agent-inbox"
 HINT_CHARS = 100
@@ -429,7 +429,7 @@ class Daemon:
         self.rename_panes(agents)
         self.report_topics(agents)
         live = {a["terminal_id"] for a in agents}
-        prune_sub_links(live)
+        prune_sub_links(lambda: {a["terminal_id"] for a in herdr_request("agent.list", {}).get("agents", [])})
         self.state = {tid: st for tid, st in self.state.items() if tid in live}
         save_json("state.json", self.state)
         save_json("links.json", self.links)
@@ -605,7 +605,10 @@ class Daemon:
 
     def claude_pid(self, rec):
         if rec["pane_id"] not in self.claude_pids:
-            self.claude_pids[rec["pane_id"]] = herdr_request("pane.process_info", {"pane_id": rec["pane_id"]})["process_info"]["foreground_process_group_id"]
+            try:
+                self.claude_pids[rec["pane_id"]] = herdr_request("pane.process_info", {"pane_id": rec["pane_id"]})["process_info"]["foreground_process_group_id"]
+            except PaneNotFound:
+                self.claude_pids[rec["pane_id"]] = None
         return self.claude_pids[rec["pane_id"]]
 
     def report(self, rec, st, now, layout):

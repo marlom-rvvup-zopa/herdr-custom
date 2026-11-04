@@ -231,6 +231,13 @@ class ShellMarkTest(DaemonTest):
     def test_agent_without_a_shell_shows_nothing(self):
         self.assertIsNone(self.mark({1}))
 
+    def test_agent_whose_pane_has_closed_has_no_shell(self):
+        def gone(method, params, timeout=10.0):
+            raise daemon.PaneNotFound("pane.process_info: pane not found")
+
+        with mock.patch.object(daemon, "herdr_request", gone):
+            self.assertFalse(self.daemon.has_shell(self.rec))
+
     def extra_tokens(self, shell_waiting):
         layout = daemon.layouts([self.rec], {"a": {"last_used": 1, "unseen_done": False}}, {}, set(), set(), shell_waiting)["a"]
         self.daemon.report(self.rec, {"last_used": 1, "status": "idle", "unseen_done": False}, NOW, layout)

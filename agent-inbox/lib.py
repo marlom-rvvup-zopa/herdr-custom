@@ -39,6 +39,10 @@ def state_dir():
     return path
 
 
+class PaneNotFound(RuntimeError):
+    """The pane closed between listing it and asking about it."""
+
+
 def herdr_request(method, params, timeout=10.0):
     """One request per connection; herdr closes it after replying."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
@@ -55,7 +59,8 @@ def herdr_request(method, params, timeout=10.0):
         raise RuntimeError("%s: connection closed without a reply" % method)
     resp = json.loads(buf)
     if "error" in resp:
-        raise RuntimeError("%s: %s" % (method, resp["error"]))
+        error = PaneNotFound if resp["error"].get("code") == "pane_not_found" else RuntimeError
+        raise error("%s: %s" % (method, resp["error"]))
     return resp.get("result") or {}
 
 
@@ -91,10 +96,12 @@ def link_sub_agent(child_terminal_id, parent_terminal_id):
         save_json("subagents.json", links)
 
 
-def prune_sub_links(live_terminals):
-    """Forget sub agents whose terminals are gone."""
+def prune_sub_links(read_live_terminals):
+    """Forget sub agents whose terminals are gone. The terminals are read under the lock: a link is written after
+    its terminal is listed, so a list read after taking the lock always has the terminal of every link."""
     with open(os.path.join(state_dir(), "subagents.lock"), "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        live_terminals = read_live_terminals()
         links = load_json("subagents.json", {})
         kept = {c: p for c, p in links.items() if c in live_terminals}
         if kept != links:
